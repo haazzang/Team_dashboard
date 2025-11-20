@@ -240,42 +240,45 @@ def load_cash_equity_data(file):
         for c in ['원화총매매손익', '외화총매매손익']:
             if c in merged.columns:
                 merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna(0)
-
+        
         # 2. Unrealized PnL & MV: Fill 0 (No position = No unrealized)
-        # BUG FIX: '원화총평가손익'도 포함해서 포지션이 없을 때 0으로 세팅
+        # BUG FIX: include '원화총평가손익' so that on days with no position,
+        # cumulative KRW PnL is preserved via realized only.
         for c in ['원화평가손익', '외화평가손익', '원화평가금액', '외화평가금액', '원화총평가손익']:
             if c in merged.columns:
                 merged[c] = merged[c].fillna(0)
-
+        
         # 3. Static Info: Forward Fill (Currency, Sector, Name)
         for c in ['통화', '섹터', '종목명']:
             if c in merged.columns:
                 merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna('Unknown')
 
-
-# -----------------------------------------------------------
+        # -----------------------------------------------------------
         # [RETURN CALCULATION]
         # -----------------------------------------------------------
-
+        
         # 1. KRW Daily PnL
         merged['Cum_PnL_KRW'] = merged['원화총평가손익'] + merged['원화총매매손익']
         merged['Daily_PnL_KRW'] = merged.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
-
+        
         # 2. Local Daily PnL
         # Default to using Foreign columns. If KRW stock, use KRW columns.
-        # (Fallback logic: if '통화' column이 없으면 전부 KRW로 간주)
+        # Fallbacks:
+        #   - If '통화' is missing, treat everything as KRW
+        #   - If foreign unrealized/realized PnL columns are missing, default to 0
         if '통화' in merged.columns:
             is_krw = (merged['통화'].astype(str).str.strip() == 'KRW')
         else:
             is_krw = pd.Series(True, index=merged.index)
 
-        # Cum_PnL_Local = (외화평가손익 + 외화총매매손익), KRW 종목은 KRW 누적 PnL 사용
+        # Cum_PnL_Local base (foreign currency)
         merged['Cum_PnL_Local'] = 0.0
         if '외화평가손익' in merged.columns:
             merged['Cum_PnL_Local'] += merged['외화평가손익']
         if '외화총매매손익' in merged.columns:
             merged['Cum_PnL_Local'] += merged['외화총매매손익']
 
+        # For KRW stocks, local = KRW
         if '원화총평가손익' in merged.columns and '원화총매매손익' in merged.columns:
             merged.loc[is_krw, 'Cum_PnL_Local'] = merged.loc[is_krw, 'Cum_PnL_KRW']
 
@@ -284,7 +287,6 @@ def load_cash_equity_data(file):
             merged['MV_Local'] = merged['외화평가금액'].fillna(0)
         else:
             merged['MV_Local'] = 0.0
-
         if '원화평가금액' in merged.columns:
             merged.loc[is_krw, 'MV_Local'] = merged.loc[is_krw, '원화평가금액']
 
@@ -295,81 +297,64 @@ def load_cash_equity_data(file):
         merged['Prev_MV_Local'] = merged.groupby('Ticker_ID')['MV_Local'].shift(1).fillna(0)
 
         # 4. Individual Stock Local Return
-        merged['Stock_Ret_Local'] = np.where(
-            merged['Prev_MV_Local'] > 0,
-            merged['Daily_PnL_Local'] / merged['Prev_MV_Local'],
-            0
-        )
-
+        # Avoid div by zero
+        merged['Stock_Ret_Local'] = np.where(merged['Prev_MV_Local'] > 0, 
+                                             merged['Daily_PnL_Local'] / merged['Prev_MV_Local'], 
+                                             0)
+        
         # 5. Aggregation
         # (A) Portfolio Level Daily PnL (KRW)
         daily_agg = merged.groupby('기준일자').agg({
             'Daily_PnL_KRW': 'sum',
             '원화평가금액': 'sum',
             'Prev_MV_KRW': 'sum'
-        }).rename(columns={
-            '원화평가금액': 'Total_MV_KRW',
-            'Prev_MV_KRW': 'Total_Prev_MV_KRW'
-        })
-
+        }).rename(columns={'원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
+        
         # (B) Portfolio Level Local Return (Weighted Average)
         # Weight = Stock Prev_MV_KRW / Portfolio Total Prev_MV_KRW
         # Join daily total to merged
-        merged = merged.merge(
-            daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'),
-            on='기준일자', how='left'
-        )
-
-        merged['Weight'] = np.where(
-            merged['Day_Total_Prev'] > 0,
-            merged['Prev_MV_KRW'] / merged['Day_Total_Prev'],
-            0
-        )
-
+        merged = merged.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
+        
+        merged['Weight'] = np.where(merged['Day_Total_Prev'] > 0, 
+                                    merged['Prev_MV_KRW'] / merged['Day_Total_Prev'], 
+                                    0)
+        
         merged['W_Ret_Local'] = merged['Stock_Ret_Local'] * merged['Weight']
+        
         daily_local_ret = merged.groupby('기준일자')['W_Ret_Local'].sum().rename('Ret_Equity_Local')
-
-        # -----------------------------------------------------------
-        # [DAILY PERFORMANCE TABLE]
-        # -----------------------------------------------------------
-        if df_hedge.empty:
-            df_hedge = pd.DataFrame({'Hedge_PnL_KRW': [0]}, index=[daily_agg.index.min()])
-
-        df_hedge = df_hedge.copy()
-        df_hedge.index.name = '기준일자'
-
+        
+        # 6. Final Merge
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
         df_perf = df_perf.join(daily_local_ret, how='left').fillna(0)
-
-        df_perf.index = pd.to_datetime(df_perf.index)
-        df_perf = df_perf.sort_index()
-
+        
+        # Total KRW PnL
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
-
+        
         # Denominator
         denom = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
-
+        
         # Returns
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom
         # Ret_Equity_Local is already calculated
-
+        
         # Clean up first day
         df_perf = df_perf.iloc[1:].fillna(0)
-
+        
         # Cumulative
         df_perf['Cum_Equity_KRW'] = (1 + df_perf['Ret_Equity_KRW']).cumprod() - 1
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
         df_perf['Cum_Equity_Local'] = (1 + df_perf['Ret_Equity_Local']).cumprod() - 1
-
+        
         # Last Status (for details)
         df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
-
+        
         return df_perf, df_last, debug_logs, None
 
     except Exception as e:
         return None, None, None, f"Process Error: {e}"
+
 
 # ==============================================================================
 # [MAIN UI]
