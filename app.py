@@ -12,7 +12,6 @@ st.title("🚀 Team Portfolio Analysis Dashboard")
 # ==============================================================================
 # [Helper Functions]
 # ==============================================================================
-
 @st.cache_data
 def fetch_sectors_cached(tickers):
     sector_map = {}
@@ -135,7 +134,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (Fixing Local Return Logic)
+# [PART 2] Cash Equity Load (New Logic: FX Reverse Calculation)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -217,83 +216,68 @@ def load_cash_equity_data(file):
         else: eq['섹터'] = eq['섹터'].fillna('Unknown')
 
         # -----------------------------------------------------------
-        # [수익률 계산: Diff of Cumulative Method]
+        # [PRO Logic] FX Reverse Engineering for Robust Local Return
         # -----------------------------------------------------------
         eq = eq.sort_values(['Ticker_ID', '기준일자'])
         
-        # 1. KRW PnL
+        # 1. KRW PnL (Diff of Cumulative Sum)
         eq['Stock_Cum_PnL_KRW'] = eq['원화총평가손익'] + eq['원화총매매손익']
         eq['Stock_Daily_PnL_KRW'] = eq.groupby('Ticker_ID')['Stock_Cum_PnL_KRW'].diff().fillna(0)
         
-        # 2. Local PnL Preparation
-        # (A) Determine Currency and Raw Local PnL
-        if '통화' in eq.columns:
-            # KRW stocks use KRW columns, Others use Foreign columns
-            is_krw = eq['통화'] == 'KRW'
-            eq['Stock_Cum_PnL_Local_Raw'] = np.where(is_krw,
-                                                     eq['원화총평가손익'] + eq['원화총매매손익'],
-                                                     eq['외화평가손익'] + eq['외화총매매손익'])
-        else:
-            # If no currency info, assume '외화' columns hold local values (fallback)
-            eq['Stock_Cum_PnL_Local_Raw'] = eq['외화평가손익'] + eq['외화총매매손익']
-
-        # (B) Determine FX Rate (Robustly)
-        # If '평가환율' is missing or 0, try to infer from KRW_MV / Local_MV
+        # 2. FX Return Calculation
+        # If FX rate is missing or 0, infer from KRW / Local MV
         if '평가환율' not in eq.columns: eq['평가환율'] = 0
         
-        # Infer FX if 0
         eq['Infer_FX'] = np.where((eq['평가환율'] == 0) & (eq['Market Value'] != 0), 
                                   eq['원화평가금액'] / eq['Market Value'], 
                                   eq['평가환율'])
-        eq['Infer_FX'] = eq['Infer_FX'].replace([np.inf, -np.inf], 0).fillna(0)
+        eq['Final_FX'] = eq['Infer_FX'].replace([np.inf, -np.inf, np.nan], 0).replace(0, 1.0)
         
-        # Final FX Rate (Default to 1 if still 0 - e.g. KRW stock or bad data)
-        eq['Final_FX'] = np.where(eq['Infer_FX'] == 0, 1.0, eq['Infer_FX'])
+        # Calculate Daily FX Return: FX_t / FX_t-1 - 1
+        eq['Prev_FX'] = eq.groupby('Ticker_ID')['Final_FX'].shift(1)
+        eq['Stock_FX_Ret'] = np.where(eq['Prev_FX'] > 0, eq['Final_FX'] / eq['Prev_FX'] - 1, 0)
         
-        # (C) Daily Local PnL (Raw)
-        eq['Stock_Daily_PnL_Local_Raw'] = eq.groupby('Ticker_ID')['Stock_Cum_PnL_Local_Raw'].diff().fillna(0)
-        
-        # (D) Local PnL Converted to KRW using PREV FX (Pure Local Effect)
-        # Prev FX
-        eq['Prev_FX'] = eq.groupby('Ticker_ID')['Final_FX'].shift(1).fillna(method='bfill').fillna(1.0)
-        
-        # This creates the "Local Return Contribution" expressed in KRW
-        eq['Stock_Daily_Local_PnL_Contribution'] = eq['Stock_Daily_PnL_Local_Raw'] * eq['Prev_FX']
-
-        # 3. Exposure (Denominator)
+        # 3. Exposure (Prev MV KRW) for Weighting
         eq['Prev_MV_KRW'] = eq.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
 
         # 4. Aggregation
+        # Daily Aggregated PnL and MV
         daily_agg = eq.groupby('기준일자').agg({
             'Stock_Daily_PnL_KRW': 'sum',
-            'Stock_Daily_Local_PnL_Contribution': 'sum',
-            'Prev_MV_KRW': 'sum',
-            '원화평가금액': 'sum'
-        }).rename(columns={
-            'Stock_Daily_PnL_KRW': 'Daily_PnL_KRW',
-            'Stock_Daily_Local_PnL_Contribution': 'Daily_Local_PnL_Contribution',
-            'Prev_MV_KRW': 'Total_Prev_MV_KRW',
-            '원화평가금액': 'Total_MV_KRW'
-        })
-
-        # 5. Final Merge & Return Calculation
-        df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
+            '원화평가금액': 'sum',
+            'Prev_MV_KRW': 'sum'
+        }).rename(columns={'Stock_Daily_PnL_KRW': 'Daily_PnL_KRW', '원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
         
-        # Total PnL (KRW)
+        # Daily Weighted Average FX Return
+        # Weight_i = Prev_MV_KRW_i / Total_Prev_MV_KRW
+        eq = eq.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
+        eq['Weight'] = np.where(eq['Day_Total_Prev'] > 0, eq['Prev_MV_KRW'] / eq['Day_Total_Prev'], 0)
+        
+        # Portfolio FX Return
+        daily_fx_ret = eq.groupby('기준일자').apply(lambda x: (x['Stock_FX_Ret'] * x['Weight']).sum()).rename('Port_FX_Ret')
+        
+        # 5. Final Merge & Calculation
+        df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
+        df_perf = df_perf.join(daily_fx_ret, how='left').fillna(0)
+        
+        # Total PnL
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
         
         # Denominator
         denom = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
         
-        # (A) KRW Equity Return
+        # (A) KRW Equity Return (Unhedged)
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom
         
         # (B) Total Return (Hedged)
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom
         
-        # (C) Local Return
-        # Sum(Local PnL * Prev FX) / Total Prev MV
-        df_perf['Ret_Equity_Local'] = df_perf['Daily_Local_PnL_Contribution'] / denom
+        # (C) Local Return (Derived)
+        # (1 + R_KRW) = (1 + R_Local) * (1 + R_FX)
+        # (1 + R_Local) = (1 + R_KRW) / (1 + R_FX)
+        # R_Local = (1 + R_KRW) / (1 + R_FX) - 1
+        # * Using Ret_Equity_KRW (Unhedged) for derivation
+        df_perf['Ret_Equity_Local'] = (1 + df_perf['Ret_Equity_KRW'].fillna(0)) / (1 + df_perf['Port_FX_Ret'].fillna(0)) - 1
         
         df_perf.fillna(0, inplace=True)
         df_perf = df_perf.iloc[1:] 
