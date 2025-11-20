@@ -2,354 +2,294 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 import yfinance as yf
-import datetime
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
-st.title("🚀 Team Portfolio Analysis Dashboard")
+st.title("🚀 Team Portfolio Analysis (Code-Based Logic)")
 
 # ---------------------------------------------------------
-# 1. 공통 및 기존 데이터 로드 함수 (Team_PNL.xlsx 용)
-# ---------------------------------------------------------
-@st.cache_data
-def load_team_pnl_data(file):
-    try:
-        df_pnl_raw = pd.read_excel(file, sheet_name='PNL', header=None, engine='openpyxl')
-        header_idx = -1
-        for i in range(15): # 탐색 범위 확대
-            row_str = df_pnl_raw.iloc[i].astype(str).values
-            if any('일자' in s for s in row_str):
-                header_idx = i
-                break
-        if header_idx == -1: return None, None, "PNL 시트에서 '일자'를 찾을 수 없습니다."
-        
-        pnl_cols = [str(x).strip() for x in df_pnl_raw.iloc[header_idx]]
-        df_pnl_raw.columns = pnl_cols
-        df_pnl = df_pnl_raw.iloc[header_idx+1:].copy()
-        
-        df_pos_raw = pd.read_excel(file, sheet_name='Position', header=None, engine='openpyxl')
-        header_idx_pos = -1
-        for i in range(15):
-            row_str = df_pos_raw.iloc[i].astype(str).values
-            if any('일자' in s for s in row_str):
-                header_idx_pos = i
-                break
-        if header_idx_pos == -1: return None, None, "Position 시트에서 '일자'를 찾을 수 없습니다."
-        
-        pos_cols = [str(x).strip() for x in df_pos_raw.iloc[header_idx_pos]]
-        df_pos_raw.columns = pos_cols
-        df_pos = df_pos_raw.iloc[header_idx_pos+1:].copy()
-
-        def clean_df(df):
-            date_col = next((c for c in df.columns if str(c).strip() == '일자'), None)
-            if not date_col: return None
-            df.set_index(date_col, inplace=True)
-            df.index = pd.to_datetime(df.index, errors='coerce')
-            df = df.dropna(how='all')
-            df = df[df.index.notnull()]
-            df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
-            
-            new_cols = []
-            seen = {}
-            for col in df.columns:
-                c = str(col).strip()
-                if c in ['nan', 'None', '', 'NaT']: continue
-                if c in seen:
-                    seen[c] += 1
-                    new_cols.append(f"{c}_{seen[c]}")
-                else:
-                    seen[c] = 0
-                    new_cols.append(c)
-            
-            valid_idx = [i for i, c in enumerate(df.columns) if str(c).strip() not in ['nan', 'None', '', 'NaT']]
-            df_final = df.iloc[:, valid_idx]
-            df_final.columns = new_cols
-            return df_final, new_cols
-
-        df_pnl_clean, cols_pnl = clean_df(df_pnl)
-        df_pos_clean, cols_pos = clean_df(df_pos)
-        
-        return df_pnl_clean, df_pos_clean, cols_pnl
-
-    except Exception as e:
-        return None, None, f"Team_PNL 파일 오류: {e}"
-
-# ---------------------------------------------------------
-# 2. Cash Equity 데이터 로드 함수 (Holdings3.xlsx 용) - 개선됨
+# 1. 데이터 로드 및 전처리 (Python 코드 로직 반영)
 # ---------------------------------------------------------
 @st.cache_data
-def load_cash_equity_data(file):
-    debug_logs = []
+def process_portfolio_data(file):
     try:
+        # 1. 엑셀 파일 로드
         xls = pd.ExcelFile(file, engine='openpyxl')
-        sheet_names = xls.sheet_names
-        debug_logs.append(f"발견된 시트: {sheet_names}")
         
-        all_holdings = []
-        df_hedge = pd.DataFrame()
+        # 시트 분류
+        hedge_sheet_name = None
+        equity_sheets = []
         
-        for sheet in sheet_names:
-            # Hedge 시트
-            if 'hedge' in sheet.lower() or '헷지' in sheet:
-                try:
-                    df_h = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
-                    h_idx = -1
-                    for i in range(10):
-                        # 공백 제거 후 '기준일자' 찾기
-                        row_vals = [str(x).strip() for x in df_h.iloc[i].values]
-                        if '기준일자' in row_vals:
-                            h_idx = i
-                            break
-                    
-                    if h_idx != -1:
-                        df_h.columns = [str(x).strip() for x in df_h.iloc[h_idx]]
-                        df_h = df_h.iloc[h_idx+1:].copy()
-                        df_h['기준일자'] = pd.to_datetime(df_h['기준일자'], errors='coerce')
-                        df_h = df_h.dropna(subset=['기준일자'])
-                        
-                        # 숫자 변환
-                        for c in ['매매손익(원화환산)', '평가손익(원화환산)']:
-                            if c in df_h.columns:
-                                df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
-                        
-                        # Hedge PnL 계산
-                        if '매매손익(원화환산)' in df_h.columns and '평가손익(원화환산)' in df_h.columns:
-                            df_h['Hedge_PnL'] = df_h['매매손익(원화환산)'] + df_h['평가손익(원화환산)']
-                        else:
-                            df_h['Hedge_PnL'] = 0
-                            
-                        # 일별 합계
-                        df_hedge_part = df_h.groupby('기준일자')['Hedge_PnL'].sum()
-                        df_hedge = df_hedge.add(df_hedge_part, fill_value=0) # 여러 Hedge 시트가 있을 경우 합산
-                        debug_logs.append(f"✅ Hedge 시트 로드 성공: {sheet}")
-                    else:
-                        debug_logs.append(f"⚠️ {sheet} 시트에서 '기준일자' 헤더를 못 찾음")
-                except Exception as e:
-                    debug_logs.append(f"❌ {sheet} 처리 중 오류: {e}")
-
-            # Holdings 시트 (Hedge가 아닌 나머지)
+        for s in xls.sheet_names:
+            if 'hedge' in s.lower() or 'futures' in s.lower():
+                hedge_sheet_name = s
             else:
-                try:
-                    df = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
-                    h_idx = -1
-                    for i in range(15):
-                        row_vals = [str(x).strip() for x in df.iloc[i].values]
-                        if '기준일자' in row_vals and ('종목명' in row_vals or '종목코드' in row_vals):
-                            h_idx = i
-                            break
-                    
-                    if h_idx != -1:
-                        df.columns = [str(x).strip() for x in df.iloc[h_idx]]
-                        df = df.iloc[h_idx+1:].copy()
-                        # 필수 컬럼 확인
-                        if '기준일자' in df.columns:
-                            all_holdings.append(df)
-                            debug_logs.append(f"✅ Holdings 로드: {sheet} ({len(df)}행)")
-                        else:
-                            debug_logs.append(f"⚠️ {sheet}: '기준일자' 컬럼 유실")
-                    else:
-                        # Holdings 시트가 아닐 수 있음 (로그 생략 가능)
-                        pass
-                except Exception as e:
-                    debug_logs.append(f"❌ {sheet} 로드 실패: {e}")
-        
-        if not all_holdings:
-            return None, None, f"Holdings 데이터 없음. 로그: {debug_logs}"
+                equity_sheets.append(s)
+                
+        # -----------------------------------------------------
+        # 2. Equity 데이터 처리 (코드 라인 96~126 참고)
+        # -----------------------------------------------------
+        df_list = []
+        for s in equity_sheets:
+            # 헤더 찾기 (Date, Ticker 등이 있는 행)
+            d = pd.read_excel(file, sheet_name=s, header=None, engine='openpyxl')
+            header_idx = -1
+            for i in range(10):
+                row_vals = [str(x).strip() for x in d.iloc[i].values]
+                if 'Date' in row_vals or 'Ticker' in row_vals or 'Symbol' in row_vals:
+                    header_idx = i
+                    break
             
-        # 병합
-        df_holdings = pd.concat(all_holdings, ignore_index=True)
-        df_holdings['기준일자'] = pd.to_datetime(df_holdings['기준일자'], errors='coerce')
-        df_holdings = df_holdings.dropna(subset=['기준일자'])
+            if header_idx != -1:
+                d.columns = d.iloc[header_idx]
+                d = d.iloc[header_idx+1:].copy()
+                # 필수 컬럼이 있는 경우만 추가
+                # 코드에서는 'Ticker', 'Market Price', 'Market Value', 'Quantity', 'Date', 'Currency' 사용
+                # 실제 파일 컬럼명 매핑 필요
+                # 파일 예시: Date, ISIN, Ticker, Quantity, Book Price, Notional, Market Price, Market Value, ...
+                
+                # 컬럼 정규화 (공백 제거)
+                d.columns = [str(c).strip() for c in d.columns]
+                
+                # 필요한 컬럼 존재 여부 확인
+                required = ['Date', 'Ticker', 'Market Price', 'Market Value', 'Quantity', 'Currency']
+                if all(r in d.columns for r in required):
+                     df_list.append(d)
+
+        if not df_list:
+            return None, None, "유효한 Equity 시트를 찾지 못했습니다. (컬럼명: Date, Ticker, Quantity, Market Price, Market Value, Currency 확인 필요)"
+
+        eq = pd.concat(df_list, ignore_index=True)
         
-        # 숫자 변환
-        target_cols = ['외화평가손익', '외화총매매손익', '원화총평가손익', '원화총매매손익', '원화평가금액']
-        for c in target_cols:
-            if c in df_holdings.columns:
-                df_holdings[c] = pd.to_numeric(df_holdings[c], errors='coerce').fillna(0)
+        # 숫자 변환 및 날짜 처리
+        eq['Date'] = pd.to_datetime(eq['Date'], errors='coerce')
+        eq = eq.dropna(subset=['Date'])
         
-        # PnL 계산
-        if '외화평가손익' in df_holdings.columns and '외화총매매손익' in df_holdings.columns:
-            df_holdings['Local_PnL'] = df_holdings['외화평가손익'] + df_holdings['외화총매매손익']
+        num_cols = ['Market Price', 'Market Value', 'Quantity']
+        for c in num_cols:
+            eq[c] = pd.to_numeric(eq[c], errors='coerce').fillna(0)
+            
+        eq['Currency'] = eq['Currency'].astype(str).str.upper().str.strip()
         
-        if '원화총평가손익' in df_holdings.columns and '원화총매매손익' in df_holdings.columns:
-            df_holdings['KRW_PnL'] = df_holdings['원화총평가손익'] + df_holdings['원화총매매손익']
+        # 정렬 (Ticker, Date 순)
+        eq = eq.sort_values(['Ticker', 'Date'])
         
-        return df_holdings, df_hedge, debug_logs
+        # --- 핵심 로직: 전일 데이터 계산 (코드 113~118행) ---
+        # 그룹별 Shift를 통해 전일 가격, 전일 수량, 전일 평가금액 확보
+        eq['Prev_Price'] = eq.groupby('Ticker')['Market Price'].shift(1)
+        eq['Prev_Qty'] = eq.groupby('Ticker')['Quantity'].shift(1)
+        eq['Prev_MV'] = eq.groupby('Ticker')['Market Value'].shift(1)
+        
+        # 일별 PnL (로컬 통화 기준) = 전일 수량 * (당일 가격 - 전일 가격)
+        # *주의: 매매(Buy/Sell)로 인한 수량 변화가 없는 보유분(Holding)에 대한 손익만 계산됨 (Time-Weighted Return 방식)
+        eq['Daily_PnL_Local'] = eq['Prev_Qty'] * (eq['Market Price'] - eq['Prev_Price'])
+        eq['Daily_PnL_Local'] = eq['Daily_PnL_Local'].fillna(0)
+        
+        # 개별 주식 수익률 (로컬)
+        # eq['Stock_Ret'] = np.where(eq['Prev_MV'] > 0, eq['Daily_PnL_Local'] / eq['Prev_MV'], 0)
+
+        # -----------------------------------------------------
+        # 3. 환율 데이터 다운로드 및 적용 (코드 151~188행)
+        # -----------------------------------------------------
+        # 날짜 범위
+        start_dt = eq['Date'].min()
+        end_dt = eq['Date'].max()
+        
+        # 필요한 통화 목록
+        currencies = eq['Currency'].unique()
+        fx_map = {}
+        
+        # 야후 파이낸스 티커 매핑
+        fx_tickers = {
+            'USD': 'KRW=X', 
+            'HKD': 'HKDKRW=X', 
+            'JPY': 'JPYKRW=X',
+            'KRW': None
+        }
+        
+        dl_list = [fx_tickers[c] for c in currencies if c in fx_tickers and fx_tickers[c]]
+        
+        if dl_list:
+            fx_data = yf.download(dl_list, start=start_dt, end=end_dt + pd.Timedelta(days=5), progress=False)
+            if 'Adj Close' in fx_data.columns: fx_df = fx_data['Adj Close']
+            elif 'Close' in fx_data.columns: fx_df = fx_data['Close']
+            else: fx_df = fx_data
+            
+            # MultiIndex 처리
+            if isinstance(fx_df.columns, pd.MultiIndex):
+                fx_df.columns = fx_df.columns.get_level_values(0)
+                
+            # ffill로 휴장일 데이터 채움
+            fx_df = fx_df.ffill()
+        else:
+            fx_df = pd.DataFrame()
+
+        # 환율 적용 함수
+        def get_fx_rate(row):
+            ccy = row['Currency']
+            date = row['Date']
+            if ccy == 'KRW': return 1.0
+            
+            ticker = fx_tickers.get(ccy)
+            if not ticker: return 1.0 # 매핑 없으면 1.0 처리
+            
+            if ticker in fx_df.columns and date in fx_df.index:
+                return fx_df.loc[date, ticker]
+            else:
+                # 날짜 매칭 안되면 가장 최근 데이터라도 사용 (ffill 이미 됨)
+                # 혹은 1.0
+                return 1.0 
+
+        # 속도를 위해 map 사용 (apply보다 빠름)
+        # 먼저 환율 테이블을 긴 형태(melt)로 변환하여 merge하는 것이 효율적임
+        fx_long = fx_df.reset_index().melt(id_vars='Date', var_name='Ticker', value_name='Rate')
+        
+        # 통화 -> 티커 매핑
+        curr_to_ticker = {k:v for k,v in fx_tickers.items() if v}
+        eq['FX_Ticker'] = eq['Currency'].map(curr_to_ticker)
+        
+        # Merge FX
+        eq_merged = pd.merge(eq, fx_long, left_on=['Date', 'FX_Ticker'], right_on=['Date', 'Ticker'], how='left')
+        eq_merged['Rate'] = eq_merged['Rate'].fillna(1.0) # KRW or missing
+        
+        # KRW 환산 (코드 186~188행)
+        # 코드 로직: 오늘 환율을 사용하여 PnL과 MV를 환산
+        eq_merged['PnL_KRW'] = eq_merged['Daily_PnL_Local'] * eq_merged['Rate']
+        eq_merged['Prev_MV_KRW'] = eq_merged['Prev_MV'] * eq_merged['Rate']
+        
+        # -----------------------------------------------------
+        # 4. 포트폴리오 레벨 집계 (Equity) (코드 190~196행)
+        # -----------------------------------------------------
+        # 일자별 합계
+        port_daily = eq_merged.groupby('Date')[['PnL_KRW', 'Prev_MV_KRW']].sum()
+        
+        # Equity 수익률 = Equity PnL Sum / Equity Prev MV Sum
+        port_daily['Ret_Equity'] = np.where(port_daily['Prev_MV_KRW'] > 0, 
+                                            port_daily['PnL_KRW'] / port_daily['Prev_MV_KRW'], 0)
+        
+        # -----------------------------------------------------
+        # 5. Hedge 데이터 처리 (코드 420~440행)
+        # -----------------------------------------------------
+        hedge_daily = pd.DataFrame(index=port_daily.index)
+        hedge_daily['Hedge_PnL_KRW'] = 0.0
+
+        if hedge_sheet_name:
+            df_h = pd.read_excel(file, sheet_name=hedge_sheet_name, header=None, engine='openpyxl')
+            # 헤더 찾기 ('기준일자', '누적 총손익' 등)
+            h_idx = -1
+            for i in range(10):
+                row_vals = [str(x).strip() for x in df_h.iloc[i].values]
+                # 파일 예시: 기준일자, 매매손익(원화환산)..., 누적 총손익
+                # 코드 예시: Date in col 0, Cumulative PnL in col 4
+                if '기준일자' in row_vals or 'Date' in row_vals:
+                    h_idx = i
+                    break
+            
+            if h_idx != -1:
+                df_h.columns = [str(c).strip() for c in df_h.iloc[h_idx]]
+                df_h = df_h.iloc[h_idx+1:].copy()
+                
+                col_date = [c for c in df_h.columns if '일자' in c or 'Date' in c][0]
+                # 누적 손익 컬럼 찾기 (예: '누적 총손익' or 5번째 컬럼)
+                # 코드에서는 index 4 (5번째) 사용. 여기서는 이름으로 찾거나 index 사용
+                if len(df_h.columns) > 4:
+                    col_cum_pnl = df_h.columns[4] # 5번째 컬럼 가정 (코드 로직)
+                else:
+                    col_cum_pnl = [c for c in df_h.columns if '누적' in c and '손익' in c][-1]
+
+                df_h[col_date] = pd.to_datetime(df_h[col_date], errors='coerce')
+                df_h = df_h.dropna(subset=[col_date]).sort_values(col_date)
+                df_h[col_cum_pnl] = pd.to_numeric(df_h[col_cum_pnl], errors='coerce').fillna(0)
+                
+                # 일별 변동분 계산 (Diff)
+                df_h.set_index(col_date, inplace=True)
+                daily_hedge = df_h[col_cum_pnl].diff().fillna(df_h[col_cum_pnl]) # 첫날은 누적값 그대로
+                
+                # 메인 날짜 인덱스에 맞춤 (reindex)
+                hedge_daily['Hedge_PnL_KRW'] = daily_hedge.reindex(port_daily.index).fillna(0)
+
+        # -----------------------------------------------------
+        # 6. 최종 통합 (Total Return) (코드 453~458행)
+        # -----------------------------------------------------
+        final_df = port_daily.join(hedge_daily)
+        final_df['Total_PnL_KRW'] = final_df['PnL_KRW'] + final_df['Hedge_PnL_KRW']
+        
+        # Total Return = (Equity PnL + Hedge PnL) / Equity Prev MV
+        # (Hedge는 증거금만 사용하므로 분모(Exposure)는 주식 평가금액 기준)
+        final_df['Ret_Total'] = np.where(final_df['Prev_MV_KRW'] > 0,
+                                         final_df['Total_PnL_KRW'] / final_df['Prev_MV_KRW'], 0)
+        
+        # 누적 수익률
+        final_df['Cum_Equity'] = (1 + final_df['Ret_Equity']).cumprod() - 1
+        final_df['Cum_Total'] = (1 + final_df['Ret_Total']).cumprod() - 1
+        
+        return final_df, None
 
     except Exception as e:
-        return None, None, f"치명적 오류: {e}"
-
-# ---------------------------------------------------------
-# 3. Yahoo Finance Sector Fetcher
-# ---------------------------------------------------------
-@st.cache_data
-def fetch_sectors(tickers):
-    sector_map = {}
-    unique_tickers = list(set(tickers))
-    # 10개 단위로 진행바 없이 조용히 처리 (속도 위해)
-    for ticker in unique_tickers:
-        try:
-            # 단순 티커 매핑
-            t = str(ticker).strip()
-            info = yf.Ticker(t).info
-            sector_map[t] = info.get('sector', 'Unknown')
-        except:
-            sector_map[ticker] = 'Unknown'
-    return sector_map
-
-# ---------------------------------------------------------
-# 4. Cross Asset
-# ---------------------------------------------------------
-@st.cache_data
-def download_cross_assets(start_date, end_date):
-    assets = {'S&P 500': '^GSPC', 'KOSPI': '^KS11', 'USD/KRW': 'KRW=X'}
-    try:
-        data = yf.download(list(assets.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns: df = data['Adj Close']
-        elif 'Close' in data.columns: df = data['Close']
-        else: df = data
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        df.rename(columns={v: k for k, v in assets.items()}, inplace=True)
-        return df
-    except:
-        return pd.DataFrame()
+        return None, None, f"데이터 처리 중 오류 발생: {e}"
 
 # =========================================================
-# 메인 앱 로직
+# 메인 앱 UI
 # =========================================================
 
-# 사이드바
-st.sidebar.title("Dashboard Menu")
-menu = st.sidebar.radio("Go to", ["Total Portfolio (Team PNL)", "Cash Equity Analysis"])
+uploaded_file = st.sidebar.file_uploader("Upload 'Holdings2.xlsx' (or similar)", type=['xlsx'])
 
-if menu == "Total Portfolio (Team PNL)":
-    st.subheader("📊 Total Team Portfolio Dashboard")
-    uploaded_file = st.sidebar.file_uploader("Upload 'Team_PNL.xlsx'", type=['xlsx'], key="pnl")
+if uploaded_file:
+    with st.spinner("데이터 분석 및 환율 다운로드 중..."):
+        df_res, logs, err = process_portfolio_data(uploaded_file)
     
-    if uploaded_file:
-        df_pnl, df_pos, pnl_cols = load_team_pnl_data(uploaded_file)
-        if df_pnl is not None:
-            # 간단한 차트 표시 (기존 로직 생략)
-            common_idx = df_pnl.index.intersection(df_pos.index)
-            common_cols = [c for c in pnl_cols if c in df_pos.columns]
-            df_pnl = df_pnl.loc[common_idx, common_cols]
-            df_pos = df_pos.loc[common_idx, common_cols]
-            df_cum = df_pnl.cumsum()
-            df_ret = df_cum.div(df_pos.replace(0, np.nan)).fillna(0)
-            
-            st.line_chart(df_ret)
-        else:
-            st.error(pnl_cols)
-
-elif menu == "Cash Equity Analysis":
-    st.subheader("📈 Cash Equity Portfolio Analysis")
-    st.info("왼쪽 사이드바에서 'Holdings3.xlsx' 파일을 업로드해주세요.")
-    
-    uploaded_file_ce = st.sidebar.file_uploader("Upload 'Holdings3.xlsx'", type=['xlsx'], key="ce")
-    
-    if uploaded_file_ce:
-        df_holdings, df_hedge_daily, logs = load_cash_equity_data(uploaded_file_ce)
+    if err:
+        st.error(err)
+    else:
+        # 날짜 필터링
+        min_date, max_date = df_res.index.min(), df_res.index.max()
+        st.sidebar.write(f"📅 Data Range: {min_date.date()} ~ {max_date.date()}")
         
-        # 디버그 로그 표시 (접기 가능)
-        with st.expander("Data Loading Logs (Debug)", expanded=False):
-            st.write(logs)
+        # --- 1. 성과 요약 (Summary) ---
+        st.markdown("### 📊 Portfolio Performance Summary")
+        last_day = df_res.iloc[-1]
         
-        if df_holdings is not None and not df_holdings.empty:
-            # -------------------------------------------------
-            # 1. 성과 집계
-            # -------------------------------------------------
-            # 일별 주식 PnL 및 Exposure
-            daily_equity = df_holdings.groupby('기준일자')[['KRW_PnL', '원화평가금액']].sum()
-            
-            # Hedge 병합
-            if isinstance(df_hedge_daily, pd.Series):
-                df_hedge_daily = df_hedge_daily.to_frame(name='Hedge_PnL')
-            elif isinstance(df_hedge_daily, pd.DataFrame) and 'Hedge_PnL' not in df_hedge_daily.columns:
-                df_hedge_daily['Hedge_PnL'] = 0
-                
-            df_perf = daily_equity.join(df_hedge_daily, how='outer').fillna(0)
-            df_perf['Total_PnL'] = df_perf['KRW_PnL'] + df_perf['Hedge_PnL']
-            
-            # 수익률 계산 (Time-Weighted Proxy)
-            # Denominator: Previous Day's MV (Approx for capital base)
-            df_perf['Prev_MV'] = df_perf['원화평가금액'].shift(1)
-            # 첫날은 수익률 0 처리 (혹은 당일 MV 사용 가능하나 보수적으로)
-            df_perf = df_perf.iloc[1:].copy() 
-            
-            # 0으로 나누기 방지
-            df_perf['Ret_Equity'] = np.where(df_perf['Prev_MV'] > 0, df_perf['KRW_PnL'] / df_perf['Prev_MV'], 0)
-            df_perf['Ret_Hedged'] = np.where(df_perf['Prev_MV'] > 0, df_perf['Total_PnL'] / df_perf['Prev_MV'], 0)
-            
-            # 누적
-            df_perf['Cum_Equity'] = (1 + df_perf['Ret_Equity']).cumprod() - 1
-            df_perf['Cum_Hedged'] = (1 + df_perf['Ret_Hedged']).cumprod() - 1
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Cumulative Return", f"{last_day['Cum_Total']:.2%}")
+        c2.metric("Equity Only Return", f"{last_day['Cum_Equity']:.2%}")
+        c3.metric("Hedge Contribution", f"{(last_day['Cum_Total'] - last_day['Cum_Equity']):.2%}")
+        c4.metric("Current AUM (KRW)", f"{last_day['Prev_MV_KRW']:,.0f}") # 전일 MV 기준이므로 근사치
 
-            # -------------------------------------------------
-            # 2. 벤치마크
-            # -------------------------------------------------
-            if not df_perf.empty:
-                s, e = df_perf.index.min(), df_perf.index.max()
-                df_bm = download_cross_assets(s, e)
-                bm_cum = pd.DataFrame()
-                if not df_bm.empty:
-                    df_bm = df_bm.reindex(df_perf.index, method='ffill')
-                    bm_ret = df_bm.pct_change().fillna(0)
-                    if 'KOSPI' in bm_ret.columns:
-                        bm_cum['KOSPI'] = (1 + bm_ret['KOSPI']).cumprod() - 1
+        # --- 2. 차트 (Chart) ---
+        st.markdown("### 📈 Cumulative Return (Equity vs Total)")
+        
+        # 벤치마크 다운로드 (비교용)
+        bm_data = yf.download(['^GSPC', '^KS11'], start=min_date, end=max_date + pd.Timedelta(days=1), progress=False)['Adj Close']
+        if not bm_data.empty:
+             bm_data = bm_data.ffill().reindex(df_res.index).pct_change().fillna(0)
+             bm_cum = (1 + bm_data).cumprod() - 1
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['Cum_Total'], name='Total Portfolio (Hedged)', line=dict(color='#2563eb', width=3)))
+        fig.add_trace(go.Scatter(x=df_res.index, y=df_res['Cum_Equity'], name='Equity Only', line=dict(color='lightblue', width=2, dash='dot')))
+        
+        if not bm_data.empty:
+            if '^GSPC' in bm_cum.columns:
+                fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum['^GSPC'], name='S&P 500', line=dict(color='grey', width=1, dash='dash')))
+            if '^KS11' in bm_cum.columns:
+                fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum['^KS11'], name='KOSPI', line=dict(color='lightgrey', width=1, dash='dash')))
 
-                # -------------------------------------------------
-                # 3. 대시보드 UI
-                # -------------------------------------------------
-                
-                # (A) Summary
-                st.markdown("### Performance Summary")
-                c1, c2, c3, c4 = st.columns(4)
-                
-                last_row = df_perf.iloc[-1]
-                c1.metric("Total Return (Hedged)", f"{last_row['Cum_Hedged']:.2%}")
-                c2.metric("Equity Only Return", f"{last_row['Cum_Equity']:.2%}")
-                c3.metric("Hedge Impact", f"{(last_row['Cum_Hedged'] - last_row['Cum_Equity']):.2%}")
-                c4.metric("Current AUM", f"{last_row['원화평가금액']:,.0f} ₩")
-                
-                # (B) Chart
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df_perf.index, y=df_perf['Cum_Hedged'], name='Hedged Portfolio', line=dict(color='blue', width=2)))
-                fig.add_trace(go.Scatter(x=df_perf.index, y=df_perf['Cum_Equity'], name='Equity Only', line=dict(color='lightblue', dash='dot')))
-                if 'KOSPI' in bm_cum.columns:
-                    fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum['KOSPI'], name='KOSPI', line=dict(color='grey', dash='dash')))
-                
-                fig.update_layout(title="Cumulative Return", template="plotly_white", height=500, yaxis_tickformat=".2%")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # (C) Sector Analysis
-                st.markdown("### Portfolio Breakdown")
-                latest_dt = df_holdings['기준일자'].max()
-                df_cur = df_holdings[df_holdings['기준일자'] == latest_dt].copy()
-                
-                # 섹터 정보 없으면 가져오기
-                if '섹터' not in df_cur.columns:
-                    if '심볼' in df_cur.columns:
-                        with st.spinner("Fetching Sectors..."):
-                            sec_map = fetch_sectors(df_cur['심볼'].dropna().unique())
-                            df_cur['섹터'] = df_cur['심볼'].map(sec_map).fillna('Unknown')
-                    else:
-                        df_cur['섹터'] = 'Unknown'
-                
-                c_left, c_right = st.columns(2)
-                
-                with c_left:
-                    sec_grp = df_cur.groupby('섹터')['원화평가금액'].sum().reset_index()
-                    fig_pie = px.pie(sec_grp, values='원화평가금액', names='섹터', title="Sector Exposure")
-                    st.plotly_chart(fig_pie, use_container_width=True)
-                    
-                with c_right:
-                    # Top Gainers
-                    st.write("Top 5 Holdings (Size)")
-                    top_hold = df_cur.sort_values('원화평가금액', ascending=False).head(5)[['종목명', '섹터', '원화평가금액']]
-                    st.dataframe(top_hold.style.format({'원화평가금액': '{:,.0f}'}), use_container_width=True)
+        fig.update_layout(template="plotly_white", height=500, yaxis_tickformat=".2%", hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # --- 3. 데이터 테이블 ---
+        with st.expander("View Daily Data"):
+            st.dataframe(df_res.style.format("{:,.0f}", subset=['PnL_KRW', 'Prev_MV_KRW', 'Hedge_PnL_KRW', 'Total_PnL_KRW'])
+                         .format("{:.4%}", subset=['Ret_Equity', 'Ret_Total', 'Cum_Equity', 'Cum_Total']))
 
-        else:
-            st.warning("데이터 로드 후 결과가 비어있습니다. 로그를 확인하세요.")
+else:
+    st.info("👈 왼쪽 사이드바에서 엑셀 파일(Holdings2.xlsx)을 업로드해주세요.")
+    st.markdown("""
+    #### 📌 수익률 계산 로직 (Python Script 기반)
+    1. **Equity PnL (Local):** `전일수량(Quantity_t-1)` × (`당일주가(Price_t)` - `전일주가(Price_t-1)`)
+    2. **Equity PnL (KRW):** `Equity PnL (Local)` × `당일환율(FX_t)`
+    3. **Equity MV (KRW):** `전일평가금액(MV_Local_t-1)` × `당일환율(FX_t)`
+    4. **Hedge PnL (KRW):** Hedge 시트의 `누적손익(Cumulative)` 차분(Diff)
+    5. **Total Return:** (`Equity PnL KRW` + `Hedge PnL KRW`) ÷ `Equity MV KRW`
+    """)
