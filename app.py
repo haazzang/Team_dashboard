@@ -192,7 +192,7 @@ def load_cash_equity_data(file):
         
         # Rename
         rename_map = {
-            '평가단가': 'Market Price', '외화평가금액': 'Market Value',
+            '평가단가': 'Market Price',
             '종목코드': 'Ticker', '심볼': 'Symbol'
         }
         eq.rename(columns=rename_map, inplace=True)
@@ -242,8 +242,6 @@ def load_cash_equity_data(file):
                 merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna(0)
         
         # 2. Unrealized PnL & MV: Fill 0 (No position = No unrealized)
-        # BUG FIX: include '원화총평가손익' so that on days with no position,
-        # cumulative KRW PnL is preserved via realized only.
         for c in ['원화평가손익', '외화평가손익', '원화평가금액', '외화평가금액', '원화총평가손익']:
             if c in merged.columns:
                 merged[c] = merged[c].fillna(0)
@@ -264,21 +262,21 @@ def load_cash_equity_data(file):
         # 2. Local Daily PnL
         # Default to using Foreign columns. If KRW stock, use KRW columns.
         # Fallbacks:
-        #   - If '통화' is missing, treat everything as KRW
-        #   - If foreign unrealized/realized PnL columns are missing, default to 0
+        #   - If '통화' not present, treat everything as KRW
+        #   - If foreign PnL / MV columns are missing, treat them as 0
         if '통화' in merged.columns:
             is_krw = (merged['통화'].astype(str).str.strip() == 'KRW')
         else:
             is_krw = pd.Series(True, index=merged.index)
 
-        # Cum_PnL_Local base (foreign currency)
+        # Base: foreign currency unrealized + realized PnL
         merged['Cum_PnL_Local'] = 0.0
         if '외화평가손익' in merged.columns:
             merged['Cum_PnL_Local'] += merged['외화평가손익']
         if '외화총매매손익' in merged.columns:
             merged['Cum_PnL_Local'] += merged['외화총매매손익']
 
-        # For KRW stocks, local = KRW
+        # For KRW stocks, local = KRW cumulative PnL
         if '원화총평가손익' in merged.columns and '원화총매매손익' in merged.columns:
             merged.loc[is_krw, 'Cum_PnL_Local'] = merged.loc[is_krw, 'Cum_PnL_KRW']
 
