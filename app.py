@@ -135,7 +135,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (Robust PnL Logic)
+# [PART 2] Cash Equity Load (Fixed Local Return)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -146,7 +146,7 @@ def load_cash_equity_data(file):
         df_hedge = pd.DataFrame()
         
         for sheet in xls.sheet_names:
-            # [A] Hedge Sheet
+            # [A] Hedge
             if 'hedge' in sheet.lower() or '헷지' in sheet:
                 try:
                     df_h = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -168,7 +168,7 @@ def load_cash_equity_data(file):
                             else: df_hedge = df_hedge.add(daily_hedge.to_frame(name='Hedge_PnL_KRW'), fill_value=0)
                 except: pass
             
-            # [B] Equity Sheet
+            # [B] Equity
             else:
                 try:
                     df = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -185,20 +185,20 @@ def load_cash_equity_data(file):
 
         if not all_holdings: return None, None, None, "Holdings 데이터가 없습니다."
 
-        # 2. 병합 및 전처리
         eq = pd.concat(all_holdings, ignore_index=True)
         eq['기준일자'] = pd.to_datetime(eq['기준일자'], errors='coerce')
         eq = eq.dropna(subset=['기준일자'])
         
-        # 컬럼명 표준화 및 숫자 변환
-        cols_target = ['원화평가금액', '원화총평가손익', '원화총매매손익', '외화평가금액', '외화평가손익', '외화총매매손익', '잔고수량']
+        # 숫자 변환
+        # 원화평가금액, 원화총평가손익, 원화총매매손익, 외화평가금액, 외화평가손익, 외화총매매손익, 잔고수량
+        cols_target = [c for c in eq.columns if '금액' in c or '손익' in c or '수량' in c or '단가' in c]
         for c in cols_target:
-            if c in eq.columns: eq[c] = pd.to_numeric(eq[c], errors='coerce').fillna(0)
+            eq[c] = pd.to_numeric(eq[c], errors='coerce').fillna(0)
 
-        # 종목 식별자
+        # ID & Sector
         id_col = '심볼' if '심볼' in eq.columns else '종목코드'
+        eq['Ticker'] = eq[id_col].fillna('Unknown')
         
-        # 섹터 매핑 (데이터 쪼개기 전에 수행)
         if '섹터' not in eq.columns:
             if '심볼' in eq.columns:
                 uniques = eq['심볼'].dropna().unique()
@@ -207,57 +207,59 @@ def load_cash_equity_data(file):
             else: eq['섹터'] = 'Unknown'
         else: eq['섹터'] = eq['섹터'].fillna('Unknown')
 
-        # 3. 수익률 계산 (Diff 방식)
-        eq = eq.sort_values([id_col, '기준일자'])
+        # -----------------------------------------------------------
+        # [수익률 계산] Diff 방식 (Realized PnL 포함)
+        # -----------------------------------------------------------
+        eq = eq.sort_values(['Ticker', '기준일자'])
         
-        # (A) KRW PnL Calculation
+        # 1. PnL (KRW)
         eq['Stock_Cum_PnL_KRW'] = eq['원화총평가손익'] + eq['원화총매매손익']
-        eq['Stock_Daily_PnL_KRW'] = eq.groupby(id_col)['Stock_Cum_PnL_KRW'].diff().fillna(0)
+        eq['Stock_Daily_PnL_KRW'] = eq.groupby('Ticker')['Stock_Cum_PnL_KRW'].diff().fillna(0)
         
-        # (B) Local PnL Calculation (New Logic)
-        # Local PnL 정의: (KRW 일 때는 원화, 아닐 때는 외화)
-        # 혹은 그냥 외화 컬럼 사용 (KRW 종목도 외화 컬럼에 값이 있는지 확인 필요하지만, 보통 로컬통화가 외화컬럼에 찍힘)
-        # 안전하게 통화별 분기
-        if '통화' in eq.columns:
-            # 통화가 KRW면 원화 컬럼 사용, 아니면 외화 컬럼 사용
-            eq['Stock_Cum_PnL_Local'] = np.where(eq['통화'] == 'KRW', 
-                                                 eq['원화총평가손익'] + eq['원화총매매손익'],
-                                                 eq['외화평가손익'] + eq['외화총매매손익'])
-            eq['Local_MV'] = np.where(eq['통화'] == 'KRW', eq['원화평가금액'], eq['외화평가금액'])
+        # 2. PnL (Local) -> 외화 컬럼 사용
+        # 외화 컬럼이 없으면 원화 사용 (KRW 종목)
+        if '외화평가손익' in eq.columns:
+            eq['Stock_Cum_PnL_Local'] = eq['외화평가손익'] + eq['외화총매매손익']
+            # 만약 KRW 종목이라 외화가 0이라면? -> 원화 값을 써야 함.
+            # 보통 '통화' 컬럼이 있음.
+            if '통화' in eq.columns:
+                mask_krw = eq['통화'] == 'KRW'
+                eq.loc[mask_krw, 'Stock_Cum_PnL_Local'] = eq.loc[mask_krw, 'Stock_Cum_PnL_KRW']
+                # KRW 종목은 외화평가금액도 원화평가금액으로
+                if '외화평가금액' in eq.columns:
+                    eq.loc[mask_krw, '외화평가금액'] = eq.loc[mask_krw, '원화평가금액']
         else:
-            # 통화 컬럼 없으면 외화 컬럼 우선 (없으면 0)
-            eq['Stock_Cum_PnL_Local'] = eq.get('외화평가손익', 0) + eq.get('외화총매매손익', 0)
-            eq['Local_MV'] = eq.get('외화평가금액', 0)
+            eq['Stock_Cum_PnL_Local'] = eq['Stock_Cum_PnL_KRW'] # Fallback
+            
+        eq['Stock_Daily_PnL_Local'] = eq.groupby('Ticker')['Stock_Cum_PnL_Local'].diff().fillna(0)
 
-        eq['Stock_Daily_PnL_Local'] = eq.groupby(id_col)['Stock_Cum_PnL_Local'].diff().fillna(0)
-        
-        # Exposure (Denominator)
-        eq['Prev_MV_KRW'] = eq.groupby(id_col)['원화평가금액'].shift(1).fillna(0)
-        eq['Prev_MV_Local'] = eq.groupby(id_col)['Local_MV'].shift(1).fillna(0)
+        # 3. Exposure (Prev MV)
+        # Local Return 계산을 위한 개별 종목의 Local Prev MV 필요
+        # 외화평가금액 사용
+        col_local_mv = '외화평가금액' if '외화평가금액' in eq.columns else '원화평가금액'
+        eq['Prev_MV_Local'] = eq.groupby('Ticker')[col_local_mv].shift(1).fillna(0)
+        eq['Prev_MV_KRW'] = eq.groupby('Ticker')['원화평가금액'].shift(1).fillna(0)
 
-        # 4. Aggregation (일별 집계)
+        # 4. 개별 종목 Local Return
+        # Ret = PnL / Prev_MV
+        eq['Stock_Ret_Local'] = np.where(eq['Prev_MV_Local'] > 0, 
+                                       eq['Stock_Daily_PnL_Local'] / eq['Prev_MV_Local'], 
+                                       0)
+
+        # 5. Aggregation (Weighted Average for Local Return)
+        # 일별 전체 Prev_MV_KRW
         daily_agg = eq.groupby('기준일자').agg({
             'Stock_Daily_PnL_KRW': 'sum',
-            'Stock_Daily_PnL_Local': 'sum', # 단순 합산은 의미 없으나 중간 과정용
             '원화평가금액': 'sum',
             'Prev_MV_KRW': 'sum'
         }).rename(columns={'Stock_Daily_PnL_KRW': 'Daily_PnL_KRW', '원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
 
-        # 5. Local Return (Weighted Average)
-        # Logic: Sum( Stock_Local_PnL / Stock_Prev_Local_MV * Weight )
-        # But dividing by 0 is bad.
-        # Alternative: Weighted Return = Sum(Stock_Local_PnL * (FX_Rate_T-1?)) / Total_Prev_MV_KRW
-        # Simple approach: Weighted average of individual stock returns
+        # Local Return Aggregation
+        # Weight = Individual Prev_MV_KRW / Daily Total Prev_MV_KRW
+        # merge daily total back to eq
+        eq = eq.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
         
-        # 개별 종목 수익률
-        eq['Stock_Ret_Local'] = np.where(eq['Prev_MV_Local'] > 0, eq['Stock_Daily_PnL_Local'] / eq['Prev_MV_Local'], 0)
-        
-        # 가중치 (전일 KRW 평가금액 기준)
-        # 일별 총액 붙이기
-        total_prev_mv = daily_agg['Total_Prev_MV_KRW']
-        eq = eq.merge(total_prev_mv.rename('Day_Total_Prev_MV'), on='기준일자', how='left')
-        
-        eq['Weight'] = np.where(eq['Day_Total_Prev_MV'] > 0, eq['Prev_MV_KRW'] / eq['Day_Total_Prev_MV'], 0)
+        eq['Weight'] = np.where(eq['Day_Total_Prev'] > 0, eq['Prev_MV_KRW'] / eq['Day_Total_Prev'], 0)
         eq['W_Ret_Local'] = eq['Stock_Ret_Local'] * eq['Weight']
         
         daily_local_ret = eq.groupby('기준일자')['W_Ret_Local'].sum().rename('Ret_Equity_Local')
@@ -266,26 +268,24 @@ def load_cash_equity_data(file):
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
         df_perf = df_perf.join(daily_local_ret, how='left').fillna(0)
         
-        # Hedge & Total
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
         
-        # 수익률 (분모: Total_Prev_MV_KRW)
+        # KRW Return
         df_perf['Ret_Equity_KRW'] = np.where(df_perf['Total_Prev_MV_KRW'] > 0, 
                                              df_perf['Daily_PnL_KRW'] / df_perf['Total_Prev_MV_KRW'], 0)
         
         df_perf['Ret_Total_KRW'] = np.where(df_perf['Total_Prev_MV_KRW'] > 0, 
                                             df_perf['Total_PnL_KRW'] / df_perf['Total_Prev_MV_KRW'], 0)
         
-        # 첫날 제외 (수익률 왜곡 방지)
-        df_perf = df_perf.iloc[1:]
-        
         # 누적
+        df_perf = df_perf.iloc[1:] # 첫날 제외
+        
         df_perf['Cum_Equity_KRW'] = (1 + df_perf['Ret_Equity_KRW']).cumprod() - 1
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
         df_perf['Cum_Equity_Local'] = (1 + df_perf['Ret_Equity_Local']).cumprod() - 1
         
-        # 종목별 최종 상태
-        df_last = eq.sort_values('기준일자').groupby(id_col).tail(1)
+        # Last Status
+        df_last = eq.sort_values('기준일자').groupby('Ticker').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
         
         return df_perf, df_last, debug_logs, None
@@ -337,7 +337,7 @@ if menu == "Total Portfolio (Team PNL)":
                 if bm_name in bm_cum.columns:
                     fig.add_trace(go.Scatter(x=df_user_ret.index, y=bm_cum[bm_name], name=bm_name, line=dict(color='grey', dash='dash')))
                 st.plotly_chart(fig, use_container_width=True)
-                
+            
             with t2:
                 stats = pd.DataFrame(index=df_daily_ret.columns)
                 stats['Volatility'] = df_daily_ret.std() * np.sqrt(252)
@@ -430,7 +430,6 @@ elif menu == "Cash Equity Analysis":
             with t1:
                 max_date = df_perf.index.max()
                 # 현재 보유 종목
-                # df_last는 종목별 마지막 레코드이므로, 날짜가 max_date인 것만 필터링
                 curr_hold = df_last[(df_last['기준일자'] == max_date) & (df_last['잔고수량'] > 0)]
                 
                 if not curr_hold.empty:
