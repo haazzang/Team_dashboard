@@ -348,6 +348,8 @@ def load_cash_equity_data(file):
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
         df_perf['Cum_Equity_Local_Unhedged'] = (1 + df_perf['Ret_Equity_Local_Unhedged']).cumprod() - 1
         df_perf['Cum_Total_Local_Hedged'] = (1 + df_perf['Ret_Total_Local_Hedged']).cumprod() - 1
+        # Backward-compatible alias so existing UI referring to Cum_Equity_Local works
+        df_perf['Cum_Equity_Local'] = df_perf['Cum_Equity_Local_Unhedged']
 
         
         # Last Status (for details)
