@@ -261,27 +261,27 @@ def load_cash_equity_data(file):
         
         # 2. Local Daily PnL & Stock Returns (Holdings2 logic adaptation)
         # Use previous day's quantity and price in local currency
-        if 'Market Price' in merged.columns:
+        if ('Market Price' in merged.columns) and ('잔고수량' in merged.columns):
             merged['Prev_Price_Local'] = merged.groupby('Ticker_ID')['Market Price'].shift(1)
+            merged['Prev_Qty_Local'] = merged.groupby('Ticker_ID')['잔고수량'].shift(1)
+            merged['Prev_MV_Local'] = merged['Prev_Price_Local'] * merged['Prev_Qty_Local']
+            merged['Daily_PnL_Local'] = (
+                merged['Prev_Qty_Local'] * (merged['Market Price'] - merged['Prev_Price_Local'])
+            ).fillna(0.0)
         else:
             merged['Prev_Price_Local'] = np.nan
-
-        if '잔고수량' in merged.columns:
-            merged['Prev_Qty_Local'] = merged.groupby('Ticker_ID')['잔고수량'].shift(1)
-        else:
             merged['Prev_Qty_Local'] = 0.0
-
-        merged['Prev_MV_Local'] = merged['Prev_Price_Local'] * merged['Prev_Qty_Local']
-        merged['Daily_PnL_Local'] = (merged['Prev_Qty_Local'] * (merged['Market Price'] - merged['Prev_Price_Local'])).fillna(0.0)
+            merged['Prev_MV_Local'] = 0.0
+            merged['Daily_PnL_Local'] = 0.0
 
         # Stock-level local returns (only where there was previous exposure)
         merged['Stock_Ret_Local'] = np.where(
-            (merged['Prev_MV_Local'].notna()) & (merged['Prev_MV_Local'] > 0),
+            (merged['Prev_MV_Local'] > 0),
             merged['Daily_PnL_Local'] / merged['Prev_MV_Local'],
             np.nan
         )
 
-        # 3. Exposure (Prev MV in KRW) for weighting
+# 3. Exposure (Prev MV in KRW) for weighting
         merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1)
 
         # 4. Portfolio-level local equity return (value-weighted by Prev_MV_KRW)
@@ -319,17 +319,24 @@ def load_cash_equity_data(file):
         # Returns
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom
-        # Ret_Equity_Local is already calculated
-        
+        # Local equity (unhedged) return is in Ret_Equity_Local
+        df_perf['Ret_Equity_Local_Unhedged'] = df_perf['Ret_Equity_Local']
+
+        # Local total (hedged): local equity + hedge PnL (hedge logic same as KRW)
+        df_perf['Ret_Total_Local_Hedged'] = df_perf['Ret_Equity_Local_Unhedged'] + (df_perf['Hedge_PnL_KRW'] / denom)
+
         # Clean up first day
         df_perf = df_perf.iloc[1:].fillna(0)
-        
+
         # Cumulative
         df_perf['Cum_Equity_KRW'] = (1 + df_perf['Ret_Equity_KRW']).cumprod() - 1
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
-        df_perf['Cum_Equity_Local'] = (1 + df_perf['Ret_Equity_Local']).cumprod() - 1
-        
-        # Last Status (for details)
+        df_perf['Cum_Equity_Local_Unhedged'] = (1 + df_perf['Ret_Equity_Local_Unhedged']).cumprod() - 1
+        df_perf['Cum_Total_Local_Hedged'] = (1 + df_perf['Ret_Total_Local_Hedged']).cumprod() - 1
+        # Backward-compatible alias so existing UI uses Cum_Equity_Local for unhedged local
+        df_perf['Cum_Equity_Local'] = df_perf['Cum_Equity_Local_Unhedged']
+
+# Last Status (for details)
         df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
         
