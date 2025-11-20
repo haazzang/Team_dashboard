@@ -5,13 +5,14 @@ import plotly.graph_objects as go
 import plotly.express as px
 import yfinance as yf
 
-# --- Page Config ---
+# --- 페이지 설정 ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
 st.title("🚀 Team Portfolio Analysis Dashboard")
 
 # ==============================================================================
 # [Helper Functions]
 # ==============================================================================
+
 @st.cache_data
 def fetch_sectors_cached(tickers):
     sector_map = {}
@@ -76,7 +77,7 @@ def create_manual_html_table(df, title=None):
     return html
 
 # ==============================================================================
-# [PART 1] Team PNL Load (Existing Logic)
+# [PART 1] Team PNL Load (ORIGINAL CODE - UNTOUCHED)
 # ==============================================================================
 @st.cache_data
 def load_team_pnl_data(file):
@@ -134,7 +135,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (Fixed with Full Grid Logic)
+# [PART 2] Cash Equity Load (FIXED LOGIC: Full Grid + Weighted Local Return)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -144,6 +145,7 @@ def load_cash_equity_data(file):
         all_holdings = []
         df_hedge = pd.DataFrame()
         
+        # 1. Load All Sheets
         for sheet in xls.sheet_names:
             # [A] Hedge
             if 'hedge' in sheet.lower() or '헷지' in sheet:
@@ -188,20 +190,24 @@ def load_cash_equity_data(file):
         eq['기준일자'] = pd.to_datetime(eq['기준일자'], errors='coerce')
         eq = eq.dropna(subset=['기준일자'])
         
+        # Rename
         rename_map = {
             '평가단가': 'Market Price', '외화평가금액': 'Market Value',
             '종목코드': 'Ticker', '심볼': 'Symbol'
         }
         eq.rename(columns=rename_map, inplace=True)
         
+        # Numeric Conversion
         cols_num = ['원화평가금액', '원화총평가손익', '원화총매매손익', '잔고수량', 'Market Price', 'Market Value', '외화평가손익', '외화총매매손익', '평가환율']
         for c in cols_num:
             if c in eq.columns: eq[c] = pd.to_numeric(eq[c], errors='coerce').fillna(0)
 
+        # ID
         id_col = 'Ticker' if 'Ticker' in eq.columns else 'Symbol'
         if id_col not in eq.columns: id_col = '종목명'
         eq['Ticker_ID'] = eq[id_col].fillna('Unknown')
 
+        # Sector
         if '섹터' not in eq.columns:
             if 'Symbol' in eq.columns:
                 uniques = eq['Symbol'].dropna().unique()
@@ -211,102 +217,94 @@ def load_cash_equity_data(file):
         else: eq['섹터'] = eq['섹터'].fillna('Unknown')
 
         # -----------------------------------------------------------
-        # [ROBUST LOGIC] Full Grid + ffill (매도 후 누적 PnL 유지)
+        # [FULL GRID LOGIC] Fix missing rows after Sell
         # -----------------------------------------------------------
-        # 1. Create Full Date-Ticker Grid
-        all_dates = eq['기준일자'].unique()
+        all_dates = sorted(eq['기준일자'].unique())
         all_tickers = eq['Ticker_ID'].unique()
         
-        # MultiIndex Grid 생성
-        grid = pd.MultiIndex.from_product([all_dates, all_tickers], names=['기준일자', 'Ticker_ID'])
-        grid_df = pd.DataFrame(index=grid).reset_index()
-        grid_df['기준일자'] = pd.to_datetime(grid_df['기준일자'])
+        # Create Cartesian Product (Date x Ticker)
+        idx = pd.MultiIndex.from_product([all_dates, all_tickers], names=['기준일자', 'Ticker_ID'])
+        grid = pd.DataFrame(index=idx).reset_index()
         
-        # 2. Merge Original Data
-        # 중복 제거 (혹시 모를 하루 2개 레코드 방지)
+        # Merge Actual Data
+        # Drop duplicates to ensure 1 row per date-ticker
         eq_dedup = eq.drop_duplicates(subset=['기준일자', 'Ticker_ID'])
+        cols_to_keep = ['원화평가금액', '원화총평가손익', '원화총매매손익', '외화평가금액', '외화평가손익', '외화총매매손익', '통화', '섹터', '종목명']
+        cols_to_keep = [c for c in cols_to_keep if c in eq_dedup.columns]
         
-        # 필요한 컬럼만 선택해서 병합
-        target_cols = ['원화평가금액', '원화총평가손익', '원화총매매손익', '외화평가손익', '외화총매매손익', '평가환율', 'Market Value', '통화']
-        # 없는 컬럼은 제외
-        target_cols = [c for c in target_cols if c in eq_dedup.columns]
-        
-        merged = pd.merge(grid_df, eq_dedup[['기준일자', 'Ticker_ID'] + target_cols], 
-                         on=['기준일자', 'Ticker_ID'], how='left')
-        
-        # 정렬
+        merged = pd.merge(grid, eq_dedup[['기준일자', 'Ticker_ID'] + cols_to_keep], on=['기준일자', 'Ticker_ID'], how='left')
         merged = merged.sort_values(['Ticker_ID', '기준일자'])
-        
-        # 3. Handling Missing Values (The Key Step)
-        # (A) Realized PnL (총매매손익) -> Forward Fill
-        # 매도 후에도 실현 손익은 그대로 남아있어야 함
-        for col in ['원화총매매손익', '외화총매매손익']:
-            if col in merged.columns:
-                merged[col] = merged.groupby('Ticker_ID')[col].ffill().fillna(0)
-        
-        # (B) Unrealized PnL & MV (평가손익/금액) -> Fill 0
-        # 보유하지 않으면 평가손익/금액은 0
-        for col in ['원화평가손익', '외화평가손익', '원화평가금액', 'Market Value']:
-            if col in merged.columns:
-                merged[col] = merged[col].fillna(0)
-                
-        # (C) FX Rate -> Forward Fill (use last known rate for local conversion)
-        if '평가환율' in merged.columns:
-            merged['평가환율'] = merged.groupby('Ticker_ID')['평가환율'].ffill().fillna(0)
-        
-        # 4. Calculate Returns using the Filled Data
-        # (A) KRW
-        if '원화총매매손익' in merged.columns and '원화평가손익' in merged.columns:
-            merged['Cum_PnL_KRW'] = merged['원화총매매손익'] + merged['원화평가손익']
-        else:
-            merged['Cum_PnL_KRW'] = 0
-            
+
+        # --- FILLING LOGIC ---
+        # 1. Realized PnL: Forward Fill (Maintain cumulative profit after exit)
+        for c in ['원화총매매손익', '외화총매매손익']:
+            if c in merged.columns:
+                merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna(0)
+
+        # 2. Unrealized PnL & MV: Fill 0 (No position = No unrealized)
+        # BUG FIX: '원화총평가손익'도 포함해서 포지션이 없을 때 0으로 세팅
+        for c in ['원화평가손익', '외화평가손익', '원화평가금액', '외화평가금액', '원화총평가손익']:
+            if c in merged.columns:
+                merged[c] = merged[c].fillna(0)
+
+        # 3. Static Info: Forward Fill (Currency, Sector, Name)
+        for c in ['통화', '섹터', '종목명']:
+            if c in merged.columns:
+                merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna('Unknown')
+
+
+# -----------------------------------------------------------
+        # [RETURN CALCULATION]
+        # -----------------------------------------------------------
+
+        # 1. KRW Daily PnL
+        merged['Cum_PnL_KRW'] = merged['원화총평가손익'] + merged['원화총매매손익']
         merged['Daily_PnL_KRW'] = merged.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
-        
-        # (B) Local
-        # KRW 종목 처리
+
+        # 2. Local Daily PnL
+        # Default to using Foreign columns. If KRW stock, use KRW columns.
+        # (Fallback logic: if '통화' column이 없으면 전부 KRW로 간주)
         if '통화' in merged.columns:
-             # 통화 정보도 ffill 필요 (매도 후에도 해당 종목의 통화 정보는 유지되어야 로직 분기 가능)
-             merged['통화'] = merged.groupby('Ticker_ID')['통화'].ffill()
-        
-        # Calculate Local Cum PnL
-        if '외화총매매손익' in merged.columns and '외화평가손익' in merged.columns:
-            # KRW인 경우 원화값 사용
-            if '통화' in merged.columns:
-                merged['Cum_PnL_Local'] = np.where(merged['통화'] == 'KRW',
-                                                   merged['Cum_PnL_KRW'],
-                                                   merged['외화총매매손익'] + merged['외화평가손익'])
-            else:
-                merged['Cum_PnL_Local'] = merged['외화총매매손익'] + merged['외화평가손익']
+            is_krw = (merged['통화'].astype(str).str.strip() == 'KRW')
         else:
-            merged['Cum_PnL_Local'] = merged['Cum_PnL_KRW'] # Fallback
-            
+            is_krw = pd.Series(True, index=merged.index)
+
+        # Cum_PnL_Local = (외화평가손익 + 외화총매매손익), KRW 종목은 KRW 누적 PnL 사용
+        merged['Cum_PnL_Local'] = 0.0
+        if '외화평가손익' in merged.columns:
+            merged['Cum_PnL_Local'] += merged['외화평가손익']
+        if '외화총매매손익' in merged.columns:
+            merged['Cum_PnL_Local'] += merged['외화총매매손익']
+
+        if '원화총평가손익' in merged.columns and '원화총매매손익' in merged.columns:
+            merged.loc[is_krw, 'Cum_PnL_Local'] = merged.loc[is_krw, 'Cum_PnL_KRW']
+
+        # Local MV for return calculation denominator
+        if '외화평가금액' in merged.columns:
+            merged['MV_Local'] = merged['외화평가금액'].fillna(0)
+        else:
+            merged['MV_Local'] = 0.0
+
+        if '원화평가금액' in merged.columns:
+            merged.loc[is_krw, 'MV_Local'] = merged.loc[is_krw, '원화평가금액']
+
         merged['Daily_PnL_Local'] = merged.groupby('Ticker_ID')['Cum_PnL_Local'].diff().fillna(0)
-        
-        # FX Rate Inference (Robust)
-        # If FX is 0 (e.g. sold), use implied or ffilled
-        if '평가환율' not in merged.columns: merged['평가환율'] = 0
-        
-        # Infer FX
-        merged['Infer_FX'] = np.where((merged['평가환율'] == 0) & (merged['Market Value'] != 0), 
-                                      merged['원화평가금액'] / merged['Market Value'], 
-                                      merged['평가환율'])
-        # FFill Inferred FX
-        merged['Infer_FX'] = merged.groupby('Ticker_ID')['Infer_FX'].ffill().fillna(1.0).replace(0, 1.0)
-        
-        # Prev FX for conversion
-        merged['Prev_FX'] = merged.groupby('Ticker_ID')['Infer_FX'].shift(1).fillna(1.0)
-        
-        # Convert Daily Local PnL to KRW equivalent (excluding FX effect)
-        merged['Daily_Local_PnL_Contrib'] = merged['Daily_PnL_Local'] * merged['Prev_FX']
-        
-        # Exposure (Prev MV)
+
+        # 3. Exposure (Prev MV)
         merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
+        merged['Prev_MV_Local'] = merged.groupby('Ticker_ID')['MV_Local'].shift(1).fillna(0)
+
+        # 4. Individual Stock Local Return
+        merged['Stock_Ret_Local'] = np.where(
+            merged['Prev_MV_Local'] > 0,
+            merged['Daily_PnL_Local'] / merged['Prev_MV_Local'],
+            0
+        )
 
         # 5. Aggregation
+        # (A) Portfolio Level Daily PnL (KRW)
         daily_agg = merged.groupby('기준일자').agg({
             'Daily_PnL_KRW': 'sum',
-            'Daily_Local_PnL_Contrib': 'sum',
             '원화평가금액': 'sum',
             'Prev_MV_KRW': 'sum'
         }).rename(columns={
@@ -314,32 +312,64 @@ def load_cash_equity_data(file):
             'Prev_MV_KRW': 'Total_Prev_MV_KRW'
         })
 
-        # 6. Final
+        # (B) Portfolio Level Local Return (Weighted Average)
+        # Weight = Stock Prev_MV_KRW / Portfolio Total Prev_MV_KRW
+        # Join daily total to merged
+        merged = merged.merge(
+            daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'),
+            on='기준일자', how='left'
+        )
+
+        merged['Weight'] = np.where(
+            merged['Day_Total_Prev'] > 0,
+            merged['Prev_MV_KRW'] / merged['Day_Total_Prev'],
+            0
+        )
+
+        merged['W_Ret_Local'] = merged['Stock_Ret_Local'] * merged['Weight']
+        daily_local_ret = merged.groupby('기준일자')['W_Ret_Local'].sum().rename('Ret_Equity_Local')
+
+        # -----------------------------------------------------------
+        # [DAILY PERFORMANCE TABLE]
+        # -----------------------------------------------------------
+        if df_hedge.empty:
+            df_hedge = pd.DataFrame({'Hedge_PnL_KRW': [0]}, index=[daily_agg.index.min()])
+
+        df_hedge = df_hedge.copy()
+        df_hedge.index.name = '기준일자'
+
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
+        df_perf = df_perf.join(daily_local_ret, how='left').fillna(0)
+
+        df_perf.index = pd.to_datetime(df_perf.index)
+        df_perf = df_perf.sort_index()
+
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
-        
+
+        # Denominator
         denom = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
-        
+
+        # Returns
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom
-        df_perf['Ret_Equity_Local'] = df_perf['Daily_Local_PnL_Contrib'] / denom
-        
-        df_perf.fillna(0, inplace=True)
-        df_perf = df_perf.iloc[1:]
-        
+        # Ret_Equity_Local is already calculated
+
+        # Clean up first day
+        df_perf = df_perf.iloc[1:].fillna(0)
+
+        # Cumulative
         df_perf['Cum_Equity_KRW'] = (1 + df_perf['Ret_Equity_KRW']).cumprod() - 1
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
         df_perf['Cum_Equity_Local'] = (1 + df_perf['Ret_Equity_Local']).cumprod() - 1
-        
-        # Last Status
-        df_last = eq.sort_values('기준일자').groupby(id_col).tail(1)
+
+        # Last Status (for details)
+        df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
-        
+
         return df_perf, df_last, debug_logs, None
 
     except Exception as e:
         return None, None, None, f"Process Error: {e}"
-
 
 # ==============================================================================
 # [MAIN UI]
@@ -476,7 +506,12 @@ elif menu == "Cash Equity Analysis":
             t1, t2 = st.tabs(["Sector Allocation", "Top Movers"])
             with t1:
                 max_date = df_perf.index.max()
+                # df_last contains last record for all stocks.
+                # Filter for those still held on max_date
+                # Note: df_last is last record per ticker. If last record date < max_date, it means sold.
+                # So checking date is enough.
                 curr_hold = df_last[(df_last['기준일자'] == max_date) & (df_last['잔고수량'] > 0)]
+                
                 if not curr_hold.empty:
                     sec_grp = curr_hold.groupby('섹터')['원화평가금액'].sum().reset_index()
                     st.plotly_chart(px.pie(sec_grp, values='원화평가금액', names='섹터', title="Current Sector Exposure"))
