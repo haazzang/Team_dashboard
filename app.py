@@ -12,6 +12,7 @@ st.title("🚀 Team Portfolio Analysis Dashboard")
 # ==============================================================================
 # [Helper Functions]
 # ==============================================================================
+
 @st.cache_data
 def fetch_sectors_cached(tickers):
     sector_map = {}
@@ -50,6 +51,21 @@ def download_cross_assets(start_date, end_date):
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df.rename(columns={v: k for k, v in assets.items()}, inplace=True)
         return df
+    except:
+        return pd.DataFrame()
+        
+@st.cache_data
+def download_usdkrw(start_date, end_date):
+    try:
+        fx = yf.download('KRW=X', start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
+        if 'Adj Close' in fx.columns: fx = fx['Adj Close']
+        elif 'Close' in fx.columns: fx = fx['Close']
+        
+        if isinstance(fx.columns, pd.MultiIndex): fx.columns = fx.columns.get_level_values(0)
+        if isinstance(fx, pd.Series): fx = fx.to_frame(name='USD_KRW')
+        else: fx.rename(columns={'KRW=X': 'USD_KRW'}, inplace=True)
+        
+        return fx
     except:
         return pd.DataFrame()
 
@@ -134,7 +150,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (Fix: Ensure Column Names)
+# [PART 2] Cash Equity Load (Robust Logic + Local Hedge)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -144,7 +160,6 @@ def load_cash_equity_data(file):
         all_holdings = []
         df_hedge = pd.DataFrame()
         
-        # 1. Load Sheets
         for sheet in xls.sheet_names:
             # [A] Hedge
             if 'hedge' in sheet.lower() or '헷지' in sheet:
@@ -229,15 +244,11 @@ def load_cash_equity_data(file):
         merged = pd.merge(grid, eq_dedup[['기준일자', 'Ticker_ID'] + cols_keep], on=['기준일자', 'Ticker_ID'], how='left')
         merged = merged.sort_values(['Ticker_ID', '기준일자'])
 
-        # FFill Realized PnL
+        # FFill
         for c in ['원화총매매손익', '외화총매매손익']:
             if c in merged.columns: merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna(0)
-        
-        # Fill 0 for others
         for c in ['원화평가손익', '외화평가손익', '원화평가금액', 'Market Value']:
             if c in merged.columns: merged[c] = merged[c].fillna(0)
-            
-        # FFill Static
         for c in ['통화', '섹터', '종목명']:
             if c in merged.columns: merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna('Unknown')
 
@@ -246,64 +257,89 @@ def load_cash_equity_data(file):
         merged['Daily_PnL_KRW'] = merged.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
         
         # 2. Calculate Portfolio FX Return (Implied)
-        # Infer FX from valid rows
         if 'Market Value' in merged.columns:
             merged['Implied_FX'] = np.where((merged['원화평가금액']!=0) & (merged['Market Value']!=0),
                                             merged['원화평가금액']/merged['Market Value'], 0)
-            # If KRW stock, FX is 1
             if '통화' in merged.columns:
                 merged.loc[merged['통화']=='KRW', 'Implied_FX'] = 1.0
         else:
             merged['Implied_FX'] = 0
             
-        # FX Rate Smoothing (Use median per date/currency)
         fx_daily = merged[merged['Implied_FX']>0].groupby(['기준일자', '통화'])['Implied_FX'].median().reset_index()
         fx_daily.rename(columns={'Implied_FX': 'Daily_FX'}, inplace=True)
         
         merged = pd.merge(merged, fx_daily, on=['기준일자', '통화'], how='left')
         merged['Daily_FX'] = merged.groupby('Ticker_ID')['Daily_FX'].ffill().fillna(1.0)
-        
-        # FX Return (Daily)
         merged['FX_Ret'] = merged.groupby('Ticker_ID')['Daily_FX'].pct_change().fillna(0)
         
-        # Exposure
+        # 3. Exposure
         merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
-        
-        # Portfolio Aggregation
+
+        # 4. Aggregation
         daily_agg = merged.groupby('기준일자').agg({
             'Daily_PnL_KRW': 'sum',
             '원화평가금액': 'sum',
             'Prev_MV_KRW': 'sum'
         }).rename(columns={'원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
         
-        # Portfolio FX Return (Weighted)
+        # Portfolio FX Return
         merged = merged.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
         merged['Weight'] = np.where(merged['Day_Total_Prev']>0, merged['Prev_MV_KRW']/merged['Day_Total_Prev'], 0)
-        
         daily_fx_ret = merged.groupby('기준일자').apply(lambda x: (x['FX_Ret'] * x['Weight']).sum()).rename('Port_FX_Ret')
         
-        # Final Merge
+        # 5. Final Merge with Hedge
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
         df_perf = df_perf.join(daily_fx_ret, how='left').fillna(0)
         
+        # -------------------------------------------------------
+        # [NEW] Calculate Local Hedge Contribution
+        # -------------------------------------------------------
+        # Download USD/KRW
+        min_d, max_d = df_perf.index.min(), df_perf.index.max()
+        usdkrw = download_usdkrw(min_d, max_d)
+        
+        # Join USD/KRW
+        df_perf = df_perf.join(usdkrw, how='left').fillna(method='ffill').fillna(1.0)
+        if 'USD_KRW' not in df_perf.columns: df_perf['USD_KRW'] = 1.0
+        
+        # Hedge PnL in USD (Approx Local)
+        # Assuming USD as base "Global" currency or proxy for Local
+        df_perf['Hedge_PnL_USD'] = df_perf['Hedge_PnL_KRW'] / df_perf['USD_KRW']
+        
+        # Portfolio MV in USD (for denominator)
+        df_perf['Total_Prev_MV_USD'] = df_perf['Total_Prev_MV_KRW'] / df_perf['USD_KRW']
+        
+        # Total PnL (KRW)
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
-        denom = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
         
-        # KRW Return
-        df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom
-        df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom
+        # Denominators
+        denom_krw = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
+        denom_usd = df_perf['Total_Prev_MV_USD'].replace(0, np.nan)
         
-        # Local Return (Reverse Engineering)
-        # (1 + R_KRW) = (1 + R_Local) * (1 + R_FX)
-        # R_Local = (1 + R_KRW) / (1 + R_FX) - 1
+        # Returns
+        # (A) KRW
+        df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom_krw
+        df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom_krw
+        
+        # (B) Local (Derived from KRW and FX)
+        # R_Eq_Loc = (1 + R_Eq_KRW) / (1 + R_FX) - 1
         df_perf['Ret_Equity_Local'] = (1 + df_perf['Ret_Equity_KRW'].fillna(0)) / (1 + df_perf['Port_FX_Ret'].fillna(0)) - 1
+        
+        # (C) Local Hedge Contribution
+        # R_Hedge_Loc = Hedge_PnL_USD / Total_Prev_MV_USD
+        df_perf['Ret_Hedge_Local'] = df_perf['Hedge_PnL_USD'] / denom_usd
+        
+        # (D) Total Local (Hedged)
+        df_perf['Ret_Total_Local'] = df_perf['Ret_Equity_Local'] + df_perf['Ret_Hedge_Local'].fillna(0)
         
         df_perf.fillna(0, inplace=True)
         df_perf = df_perf.iloc[1:]
         
+        # Cumulative
         df_perf['Cum_Equity_KRW'] = (1 + df_perf['Ret_Equity_KRW']).cumprod() - 1
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
         df_perf['Cum_Equity_Local'] = (1 + df_perf['Ret_Equity_Local']).cumprod() - 1
+        df_perf['Cum_Total_Local'] = (1 + df_perf['Ret_Total_Local']).cumprod() - 1
         
         df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
@@ -337,6 +373,7 @@ if menu == "Total Portfolio (Team PNL)":
             df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             
+            # BM
             with st.spinner("Fetching Market Data..."):
                 df_assets = download_cross_assets(df_pnl.index.min(), df_pnl.index.max())
                 bm_cum = pd.DataFrame(index=df_user_ret.index)
@@ -414,28 +451,24 @@ elif menu == "Cash Equity Analysis":
         
         if err: st.error(err)
         elif df_perf is not None:
-            view_opt = st.radio("Currency View", ["KRW (Unhedged / Hedged)", "Local Currency (Price Return Only)"], horizontal=True)
+            view_opt = st.radio("Currency View", ["KRW", "Local Currency (USD Base)"], horizontal=True)
             
             last_day = df_perf.iloc[-1]
-            # Safe access to Total_MV_KRW
-            if 'Total_MV_KRW' in last_day:
-                curr_aum = last_day['Total_MV_KRW']
-            else:
-                curr_aum = 0
+            curr_aum = df_perf.iloc[-1]['Total_MV_KRW']
             
             c1, c2, c3, c4 = st.columns(4)
-            if view_opt.startswith("KRW"):
+            if view_opt == "KRW":
                 c1.metric("Total Return (Hedged)", f"{last_day['Cum_Total_KRW']:.2%}")
-                c2.metric("Equity Return (KRW)", f"{last_day['Cum_Equity_KRW']:.2%}")
+                c2.metric("Equity Return (Unhedged)", f"{last_day['Cum_Equity_KRW']:.2%}")
                 c3.metric("Hedge Impact", f"{(last_day['Cum_Total_KRW'] - last_day['Cum_Equity_KRW']):.2%}")
                 y_main, y_sub = 'Cum_Total_KRW', 'Cum_Equity_KRW'
                 name_main, name_sub = 'Total (Hedged)', 'Equity (KRW)'
             else:
-                c1.metric("Local Return", f"{last_day['Cum_Equity_Local']:.2%}")
-                c2.metric("Equity Return (KRW)", f"{last_day['Cum_Equity_KRW']:.2%}")
-                c3.metric("FX Impact", f"{(last_day['Cum_Equity_KRW'] - last_day['Cum_Equity_Local']):.2%}")
-                y_main, y_sub = 'Cum_Equity_Local', None
-                name_main, name_sub = 'Equity (Local)', None
+                c1.metric("Total Return (Hedged)", f"{last_day['Cum_Total_Local']:.2%}")
+                c2.metric("Equity Return (Unhedged)", f"{last_day['Cum_Equity_Local']:.2%}")
+                c3.metric("Hedge Impact", f"{(last_day['Cum_Total_Local'] - last_day['Cum_Equity_Local']):.2%}")
+                y_main, y_sub = 'Cum_Total_Local', 'Cum_Equity_Local'
+                name_main, name_sub = 'Total (Hedged)', 'Equity (Local/USD)'
             c4.metric("Current AUM", f"{curr_aum:,.0f} KRW")
 
             fig = go.Figure()
