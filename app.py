@@ -134,7 +134,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (Using Script Logic for Local, Diff Logic for KRW)
+# [PART 2] Cash Equity Load (Fix: Ensure Column Names)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -160,7 +160,6 @@ def load_cash_equity_data(file):
                         df_h['기준일자'] = pd.to_datetime(df_h['기준일자'], errors='coerce')
                         df_h = df_h.dropna(subset=['기준일자']).set_index('기준일자').sort_index()
                         
-                        # 누적 총손익 찾기
                         col_cum = next((c for c in df_h.columns if '누적' in c and '총손익' in c), None)
                         if col_cum:
                             df_h[col_cum] = pd.to_numeric(df_h[col_cum], errors='coerce').fillna(0)
@@ -190,21 +189,15 @@ def load_cash_equity_data(file):
         eq['기준일자'] = pd.to_datetime(eq['기준일자'], errors='coerce')
         eq = eq.dropna(subset=['기준일자'])
         
-        # Rename based on user mapping (Holdings2 style)
+        # Rename
         rename_map = {
-            '평가단가': 'Market_Price', 
-            '외화평가금액': 'Market_Value',
-            '원화평가금액': 'MV_KRW',
-            '종목코드': 'Ticker', 
-            '심볼': 'Symbol',
-            '잔고수량': 'Quantity',
-            '원화총평가손익': 'Cum_Val_PnL_KRW',
-            '원화총매매손익': 'Cum_Trade_PnL_KRW'
+            '평가단가': 'Market Price', '외화평가금액': 'Market Value',
+            '종목코드': 'Ticker', '심볼': 'Symbol'
         }
         eq.rename(columns=rename_map, inplace=True)
         
-        # Numeric Conversion
-        cols_num = ['MV_KRW', 'Cum_Val_PnL_KRW', 'Cum_Trade_PnL_KRW', 'Quantity', 'Market_Price', 'Market_Value']
+        # Numeric
+        cols_num = ['원화평가금액', '원화총평가손익', '원화총매매손익', '잔고수량', 'Market Price', 'Market Value', '외화평가손익', '외화총매매손익', '평가환율']
         for c in cols_num:
             if c in eq.columns: eq[c] = pd.to_numeric(eq[c], errors='coerce').fillna(0)
 
@@ -213,7 +206,6 @@ def load_cash_equity_data(file):
         if id_col not in eq.columns: id_col = '종목명'
         eq['Ticker_ID'] = eq[id_col].fillna('Unknown')
 
-        # Sector Mapping
         if '섹터' not in eq.columns:
             if 'Symbol' in eq.columns:
                 uniques = eq['Symbol'].dropna().unique()
@@ -223,74 +215,98 @@ def load_cash_equity_data(file):
         else: eq['섹터'] = eq['섹터'].fillna('Unknown')
 
         # -----------------------------------------------------------
-        # [LOGIC 1] Local Return (From Script: Price Diff)
+        # [FULL GRID + FX Reverse Logic]
         # -----------------------------------------------------------
-        eq = eq.sort_values(['Ticker_ID', '기준일자'])
+        all_dates = sorted(eq['기준일자'].unique())
+        all_tickers = eq['Ticker_ID'].unique()
+        idx = pd.MultiIndex.from_product([all_dates, all_tickers], names=['기준일자', 'Ticker_ID'])
+        grid = pd.DataFrame(index=idx).reset_index()
         
-        # Shift for Prev Day
-        eq['Prev_Price'] = eq.groupby('Ticker_ID')['Market_Price'].shift(1)
-        eq['Prev_Qty']   = eq.groupby('Ticker_ID')['Quantity'].shift(1).fillna(0)
-        eq['Prev_MV']    = eq.groupby('Ticker_ID')['Market_Value'].shift(1).fillna(0)
-        eq['Prev_MV_KRW'] = eq.groupby('Ticker_ID')['MV_KRW'].shift(1).fillna(0)
+        eq_dedup = eq.drop_duplicates(subset=['기준일자', 'Ticker_ID'])
+        cols_keep = ['원화평가금액', '원화총평가손익', '원화총매매손익', '외화평가손익', '외화총매매손익', '통화', '섹터', '종목명', 'Market Value']
+        cols_keep = [c for c in cols_keep if c in eq_dedup.columns]
+        
+        merged = pd.merge(grid, eq_dedup[['기준일자', 'Ticker_ID'] + cols_keep], on=['기준일자', 'Ticker_ID'], how='left')
+        merged = merged.sort_values(['Ticker_ID', '기준일자'])
 
-        # Daily PnL Local (Script Logic)
-        # Only calculated if Prev_Qty exists and prices are valid
-        eq['Daily_PnL_Local'] = (eq['Prev_Qty'] * (eq['Market_Price'] - eq['Prev_Price'])).fillna(0)
+        # FFill Realized PnL
+        for c in ['원화총매매손익', '외화총매매손익']:
+            if c in merged.columns: merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna(0)
         
-        # Stock Return Local
-        eq['Stock_Ret_Local'] = np.where(eq['Prev_MV'] > 0, eq['Daily_PnL_Local'] / eq['Prev_MV'], 0)
-        
-        # -----------------------------------------------------------
-        # [LOGIC 2] KRW Return (Robust Diff Method)
-        # -----------------------------------------------------------
-        eq['Cum_PnL_KRW'] = eq['Cum_Val_PnL_KRW'] + eq['Cum_Trade_PnL_KRW']
-        eq['Daily_PnL_KRW'] = eq.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
+        # Fill 0 for others
+        for c in ['원화평가손익', '외화평가손익', '원화평가금액', 'Market Value']:
+            if c in merged.columns: merged[c] = merged[c].fillna(0)
+            
+        # FFill Static
+        for c in ['통화', '섹터', '종목명']:
+            if c in merged.columns: merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna('Unknown')
 
-        # -----------------------------------------------------------
-        # [AGGREGATION]
-        # -----------------------------------------------------------
-        # 1. Calculate Daily Weights for Local Return
-        # Group by Date to get Total Prev MV KRW
-        daily_totals = eq.groupby('기준일자')['Prev_MV_KRW'].sum().rename('Total_Prev_MV_KRW')
-        eq = eq.merge(daily_totals, on='기준일자', how='left')
+        # 1. KRW PnL
+        merged['Cum_PnL_KRW'] = merged['원화총평가손익'] + merged['원화총매매손익']
+        merged['Daily_PnL_KRW'] = merged.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
         
-        # Weight = Stock Prev MV KRW / Portfolio Total Prev MV KRW
-        eq['Weight'] = np.where(eq['Total_Prev_MV_KRW'] > 0, eq['Prev_MV_KRW'] / eq['Total_Prev_MV_KRW'], 0)
+        # 2. Calculate Portfolio FX Return (Implied)
+        # Infer FX from valid rows
+        if 'Market Value' in merged.columns:
+            merged['Implied_FX'] = np.where((merged['원화평가금액']!=0) & (merged['Market Value']!=0),
+                                            merged['원화평가금액']/merged['Market Value'], 0)
+            # If KRW stock, FX is 1
+            if '통화' in merged.columns:
+                merged.loc[merged['통화']=='KRW', 'Implied_FX'] = 1.0
+        else:
+            merged['Implied_FX'] = 0
+            
+        # FX Rate Smoothing (Use median per date/currency)
+        fx_daily = merged[merged['Implied_FX']>0].groupby(['기준일자', '통화'])['Implied_FX'].median().reset_index()
+        fx_daily.rename(columns={'Implied_FX': 'Daily_FX'}, inplace=True)
         
-        # Portfolio Local Return (Weighted Sum)
-        daily_local_ret = eq.groupby('기준일자').apply(lambda x: (x['Stock_Ret_Local'] * x['Weight']).sum()).rename('Ret_Equity_Local')
+        merged = pd.merge(merged, fx_daily, on=['기준일자', '통화'], how='left')
+        merged['Daily_FX'] = merged.groupby('Ticker_ID')['Daily_FX'].ffill().fillna(1.0)
         
-        # 2. Portfolio KRW PnL Aggregation
-        daily_krw_pnl = eq.groupby('기준일자')['Daily_PnL_KRW'].sum()
+        # FX Return (Daily)
+        merged['FX_Ret'] = merged.groupby('Ticker_ID')['Daily_FX'].pct_change().fillna(0)
         
-        # 3. Merge Everything
-        df_perf = pd.DataFrame(index=daily_totals.index)
-        df_perf = df_perf.join(daily_local_ret).join(daily_krw_pnl).join(daily_totals).join(df_hedge).fillna(0)
+        # Exposure
+        merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
         
-        # -----------------------------------------------------------
-        # [FINAL CALCULATIONS]
-        # -----------------------------------------------------------
-        # Total KRW PnL
+        # Portfolio Aggregation
+        daily_agg = merged.groupby('기준일자').agg({
+            'Daily_PnL_KRW': 'sum',
+            '원화평가금액': 'sum',
+            'Prev_MV_KRW': 'sum'
+        }).rename(columns={'원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
+        
+        # Portfolio FX Return (Weighted)
+        merged = merged.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
+        merged['Weight'] = np.where(merged['Day_Total_Prev']>0, merged['Prev_MV_KRW']/merged['Day_Total_Prev'], 0)
+        
+        daily_fx_ret = merged.groupby('기준일자').apply(lambda x: (x['FX_Ret'] * x['Weight']).sum()).rename('Port_FX_Ret')
+        
+        # Final Merge
+        df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
+        df_perf = df_perf.join(daily_fx_ret, how='left').fillna(0)
+        
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
-        
-        # Denominator
         denom = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
         
-        # KRW Returns
+        # KRW Return
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom
         
-        # Exclude first day
-        df_perf = df_perf.iloc[1:].fillna(0)
+        # Local Return (Reverse Engineering)
+        # (1 + R_KRW) = (1 + R_Local) * (1 + R_FX)
+        # R_Local = (1 + R_KRW) / (1 + R_FX) - 1
+        df_perf['Ret_Equity_Local'] = (1 + df_perf['Ret_Equity_KRW'].fillna(0)) / (1 + df_perf['Port_FX_Ret'].fillna(0)) - 1
         
-        # Accumulate
+        df_perf.fillna(0, inplace=True)
+        df_perf = df_perf.iloc[1:]
+        
         df_perf['Cum_Equity_KRW'] = (1 + df_perf['Ret_Equity_KRW']).cumprod() - 1
         df_perf['Cum_Total_KRW'] = (1 + df_perf['Ret_Total_KRW']).cumprod() - 1
         df_perf['Cum_Equity_Local'] = (1 + df_perf['Ret_Equity_Local']).cumprod() - 1
         
-        # Last Status
         df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
-        df_last['Final_PnL'] = df_last['Cum_Val_PnL_KRW'] + df_last['Cum_Trade_PnL_KRW']
+        df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
         
         return df_perf, df_last, debug_logs, None
 
@@ -321,7 +337,6 @@ if menu == "Total Portfolio (Team PNL)":
             df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             
-            # BM
             with st.spinner("Fetching Market Data..."):
                 df_assets = download_cross_assets(df_pnl.index.min(), df_pnl.index.max())
                 bm_cum = pd.DataFrame(index=df_user_ret.index)
@@ -402,7 +417,11 @@ elif menu == "Cash Equity Analysis":
             view_opt = st.radio("Currency View", ["KRW (Unhedged / Hedged)", "Local Currency (Price Return Only)"], horizontal=True)
             
             last_day = df_perf.iloc[-1]
-            curr_aum = df_perf.iloc[-1]['Total_MV_KRW']
+            # Safe access to Total_MV_KRW
+            if 'Total_MV_KRW' in last_day:
+                curr_aum = last_day['Total_MV_KRW']
+            else:
+                curr_aum = 0
             
             c1, c2, c3, c4 = st.columns(4)
             if view_opt.startswith("KRW"):
@@ -435,8 +454,8 @@ elif menu == "Cash Equity Analysis":
                 max_date = df_perf.index.max()
                 curr_hold = df_last[(df_last['기준일자'] == max_date) & (df_last['잔고수량'] > 0)]
                 if not curr_hold.empty:
-                    sec_grp = curr_hold.groupby('섹터')['MV_KRW'].sum().reset_index()
-                    st.plotly_chart(px.pie(sec_grp, values='MV_KRW', names='섹터', title="Current Sector Exposure"))
+                    sec_grp = curr_hold.groupby('섹터')['원화평가금액'].sum().reset_index()
+                    st.plotly_chart(px.pie(sec_grp, values='원화평가금액', names='섹터', title="Current Sector Exposure"))
                 else: st.write("No current holdings.")
             with t2:
                 pnl_df = df_last.sort_values('Final_PnL', ascending=False)[['종목명','섹터','Final_PnL']]
