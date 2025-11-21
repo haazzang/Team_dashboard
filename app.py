@@ -11,7 +11,7 @@ st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
 st.title("🚀 Team Portfolio Analysis Dashboard")
 
 # ==============================================================================
-# [Helper Functions]
+# [Helper Functions] - Existing & New
 # ==============================================================================
 @st.cache_data
 def fetch_sectors_cached(tickers):
@@ -37,9 +37,7 @@ def download_benchmarks_all(start_date, end_date):
         if 'Adj Close' in data.columns: df = data['Adj Close']
         elif 'Close' in data.columns: df = data['Close']
         else: df = data
-        
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
         inv_map = {v: k for k, v in tickers.items()}
         df.rename(columns=inv_map, inplace=True)
         return df.ffill().pct_change().fillna(0)
@@ -84,8 +82,68 @@ def download_cross_assets(start_date, end_date):
     except:
         return pd.DataFrame()
 
+# --- [NEW] Factor Data Download ---
+@st.cache_data
+def download_factors(start_date, end_date):
+    """Download diverse factor proxies (ETFs)"""
+    factors = {
+        'Global Mkt': 'ACWI',
+        'Value': 'VLUE', 'Growth': 'IWF', 'Momentum': 'MTUM',
+        'Quality': 'QUAL', 'Low Vol': 'USMV', 'Small Cap': 'IWM',
+        'Emerging': 'EEM', 'Bond (Rates)': 'TLT', 'USD': 'UUP',
+        'Gold': 'GLD', 'Oil': 'USO'
+    }
+    try:
+        data = yf.download(list(factors.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
+        if 'Adj Close' in data.columns: df = data['Adj Close']
+        elif 'Close' in data.columns: df = data['Close']
+        else: df = data
+        
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        
+        inv_map = {v: k for k, v in factors.items()}
+        df.rename(columns=inv_map, inplace=True)
+        return df.ffill().pct_change().fillna(0)
+    except:
+        return pd.DataFrame()
+
+# --- [NEW] Factor Regression Engine ---
+def perform_factor_regression(port_ret, factor_ret):
+    try:
+        # Align Dates
+        df = pd.concat([port_ret, factor_ret], axis=1).dropna()
+        if len(df) < 20: return None, None, None
+
+        Y = df.iloc[:, 0].values # Portfolio
+        X = df.iloc[:, 1:].values # Factors
+        
+        # Add Intercept (Alpha)
+        X_w_const = np.column_stack([np.ones(len(X)), X])
+        
+        # Run OLS
+        betas, residuals, rank, s = np.linalg.lstsq(X_w_const, Y, rcond=None)
+        
+        # Results
+        factor_names = ['Alpha'] + list(df.columns[1:])
+        exposures = pd.Series(betas, index=factor_names)
+        
+        # Attribution (Beta * Factor Return)
+        contrib = pd.DataFrame(index=df.index)
+        for i, f_name in enumerate(factor_names[1:]):
+            contrib[f_name] = df.iloc[:, 1+i] * betas[i+1]
+        contrib['Alpha'] = betas[0] # Daily Alpha
+        contrib['Unexplained'] = Y - (X_w_const @ betas)
+        
+        # R-Squared
+        ss_tot = np.sum((Y - np.mean(Y))**2)
+        ss_res = np.sum(residuals) if len(residuals) > 0 else 0
+        r2 = 1 - (ss_res / ss_tot)
+        
+        return exposures, contrib, r2
+    except:
+        return None, None, None
+
 def calculate_alpha_beta(port_ret, bench_ret):
-    """Calculate Alpha/Beta using daily returns"""
     try:
         df = pd.concat([port_ret, bench_ret], axis=1).dropna()
         df.columns = ['Port', 'Bench']
@@ -118,7 +176,7 @@ def create_manual_html_table(df, title=None):
     return html
 
 # ==============================================================================
-# [PART 1] Team PNL Load (Original Logic Preserved)
+# [PART 1] Team PNL Load (Logic Unchanged)
 # ==============================================================================
 @st.cache_data
 def load_team_pnl_data(file):
@@ -130,7 +188,6 @@ def load_team_pnl_data(file):
                 h_idx = i; break
         if h_idx == -1: return None, None, "PNL Header Not Found"
         
-        # 컬럼명 중복 방지
         raw_cols = df_pnl_raw.iloc[h_idx].tolist()
         new_cols = []
         seen = {}
@@ -177,7 +234,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (Robust Column Deduplication Added)
+# [PART 2] Cash Equity Load (Logic Unchanged - Robust)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -187,9 +244,7 @@ def load_cash_equity_data(file):
         all_holdings = []
         df_hedge = pd.DataFrame()
         
-        # 1. Load Sheets
         for sheet in xls.sheet_names:
-            # [A] Hedge Sheet
             if 'hedge' in sheet.lower() or '헷지' in sheet:
                 try:
                     df_h = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -198,19 +253,10 @@ def load_cash_equity_data(file):
                         if '기준일자' in [str(x).strip() for x in df_h.iloc[i].values]:
                             h_idx = i; break
                     if h_idx != -1:
-                        # [Fix] Column Deduplication
-                        raw_cols = [str(c).strip() for c in df_h.iloc[h_idx]]
-                        new_cols = []
-                        seen = {}
-                        for c in raw_cols:
-                            if c in seen: seen[c] += 1; new_cols.append(f"{c}_{seen[c]}")
-                            else: seen[c] = 0; new_cols.append(c)
-                        
-                        df_h.columns = new_cols
+                        df_h.columns = [str(c).strip() for c in df_h.iloc[h_idx]]
                         df_h = df_h.iloc[h_idx+1:].copy()
                         df_h['기준일자'] = pd.to_datetime(df_h['기준일자'], errors='coerce')
                         df_h = df_h.dropna(subset=['기준일자']).set_index('기준일자').sort_index()
-                        
                         col_cum = next((c for c in df_h.columns if '누적' in c and '총손익' in c), None)
                         if col_cum:
                             df_h[col_cum] = pd.to_numeric(df_h[col_cum], errors='coerce').fillna(0)
@@ -218,8 +264,6 @@ def load_cash_equity_data(file):
                             if df_hedge.empty: df_hedge = daily_hedge.to_frame(name='Hedge_PnL_KRW')
                             else: df_hedge = df_hedge.add(daily_hedge.to_frame(name='Hedge_PnL_KRW'), fill_value=0)
                 except: pass
-            
-            # [B] Equity Sheet
             else:
                 try:
                     df = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -229,14 +273,14 @@ def load_cash_equity_data(file):
                         if '기준일자' in row_vals and ('종목명' in row_vals or '종목코드' in row_vals):
                             h_idx = i; break
                     if h_idx != -1:
-                        # [Fix] Column Deduplication
+                        # Deduplicate columns
                         raw_cols = [str(c).strip() for c in df.iloc[h_idx]]
                         new_cols = []
                         seen = {}
                         for c in raw_cols:
                             if c in seen: seen[c] += 1; new_cols.append(f"{c}_{seen[c]}")
                             else: seen[c] = 0; new_cols.append(c)
-                            
+                        
                         df.columns = new_cols
                         df = df.iloc[h_idx+1:].copy()
                         if '기준일자' in df.columns: all_holdings.append(df)
@@ -259,7 +303,6 @@ def load_cash_equity_data(file):
         if id_col not in eq.columns: id_col = '종목명'
         eq['Ticker_ID'] = eq[id_col].fillna('Unknown')
 
-        # Sector Mapping
         if '섹터' not in eq.columns:
             if 'Symbol' in eq.columns:
                 uniques = eq['Symbol'].dropna().unique()
@@ -268,15 +311,12 @@ def load_cash_equity_data(file):
             else: eq['섹터'] = 'Unknown'
         else: eq['섹터'] = eq['섹터'].fillna('Unknown')
 
-        # Country Mapping
         if '통화' in eq.columns:
             curr_map = {'USD': 'US', 'HKD': 'HK', 'JPY': 'JP', 'KRW': 'KR', 'CNY': 'CN'}
             eq['Country'] = eq['통화'].map(curr_map).fillna('Other')
         else: eq['Country'] = 'Other'
 
-        # -----------------------------------------------------------
-        # [FULL GRID LOGIC]
-        # -----------------------------------------------------------
+        # FULL GRID LOGIC
         all_dates = sorted(eq['기준일자'].unique())
         all_tickers = eq['Ticker_ID'].unique()
         idx = pd.MultiIndex.from_product([all_dates, all_tickers], names=['기준일자', 'Ticker_ID'])
@@ -297,11 +337,11 @@ def load_cash_equity_data(file):
         for c in ['통화', '섹터', 'Country', '종목명']:
             if c in merged.columns: merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna('Unknown')
 
-        # 1. KRW PnL
+        # Returns Calculation
         merged['Cum_PnL_KRW'] = merged['원화총평가손익'] + merged['원화총매매손익']
         merged['Daily_PnL_KRW'] = merged.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
         
-        # 2. FX & Local Return (Implied)
+        # Local Return (Reverse Engineering)
         if 'Market_Value' in merged.columns:
             merged['Implied_FX'] = np.where((merged['원화평가금액']!=0) & (merged['Market_Value']!=0),
                                             merged['원화평가금액']/merged['Market_Value'], 0)
@@ -314,10 +354,9 @@ def load_cash_equity_data(file):
         merged['Daily_FX'] = merged.groupby('Ticker_ID')['Daily_FX'].ffill().fillna(1.0)
         merged['FX_Ret'] = merged.groupby('Ticker_ID')['Daily_FX'].pct_change().fillna(0)
         
-        # 3. Exposure
         merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
         
-        # 4. Aggregation
+        # Aggregation
         daily_agg = merged.groupby('기준일자').agg({
             'Daily_PnL_KRW': 'sum',
             '원화평가금액': 'sum',
@@ -332,22 +371,22 @@ def load_cash_equity_data(file):
         contrib_sector = merged.groupby(['기준일자', '섹터'])['Contrib_KRW'].sum().reset_index()
         contrib_country = merged.groupby(['기준일자', 'Country'])['Contrib_KRW'].sum().reset_index()
         
-        # Portfolio FX Return (Weighted)
+        # Portfolio FX
         merged['Weight'] = np.where(merged['Day_Total_Prev']>0, merged['Prev_MV_KRW']/merged['Day_Total_Prev'], 0)
         daily_fx_ret = merged.groupby('기준일자').apply(lambda x: (x['FX_Ret'] * x['Weight']).sum()).rename('Port_FX_Ret')
         
-        # Country Returns (for Alpha/Beta)
+        # Country Returns
         country_daily = merged.groupby(['기준일자', 'Country']).agg({
             'Daily_PnL_KRW': 'sum', 'Prev_MV_KRW': 'sum'
         }).reset_index()
         country_daily['Country_Ret'] = np.where(country_daily['Prev_MV_KRW']>0, 
                                                 country_daily['Daily_PnL_KRW']/country_daily['Prev_MV_KRW'], 0)
 
-        # 5. Final Merge
+        # Final Merge
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
         df_perf = df_perf.join(daily_fx_ret, how='left').fillna(0)
         
-        # Local Hedge Prep
+        # Hedge Conversion
         min_d, max_d = df_perf.index.min(), df_perf.index.max()
         usdkrw = download_usdkrw(min_d, max_d)
         df_perf = df_perf.join(usdkrw, how='left').fillna(method='ffill').fillna(1400.0)
@@ -355,16 +394,14 @@ def load_cash_equity_data(file):
         
         df_perf['Hedge_PnL_USD'] = df_perf['Hedge_PnL_KRW'] / df_perf['USD_KRW']
         df_perf['Total_Prev_MV_USD'] = df_perf['Total_Prev_MV_KRW'] / df_perf['USD_KRW']
-        df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
         
+        df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
         denom_krw = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
         denom_usd = df_perf['Total_Prev_MV_USD'].replace(0, np.nan)
         
-        # Returns
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom_krw
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom_krw
         
-        # Local Return (Calculated separately for Chart & Factor Analysis)
         df_perf['Ret_Equity_Local'] = (1 + df_perf['Ret_Equity_KRW'].fillna(0)) / (1 + df_perf['Port_FX_Ret'].fillna(0)) - 1
         df_perf['Ret_Hedge_Local'] = df_perf['Hedge_PnL_USD'] / denom_usd
         df_perf['Ret_Total_Local'] = df_perf['Ret_Equity_Local'] + df_perf['Ret_Hedge_Local'].fillna(0)
@@ -372,7 +409,6 @@ def load_cash_equity_data(file):
         df_perf.fillna(0, inplace=True)
         df_perf = df_perf.iloc[1:]
         
-        # Cumulative
         for c in ['Ret_Equity_KRW', 'Ret_Total_KRW', 'Ret_Equity_Local', 'Ret_Total_Local']:
             df_perf[c.replace('Ret', 'Cum')] = (1 + df_perf[c]).cumprod() - 1
             
@@ -474,7 +510,7 @@ elif menu == "Cash Equity Analysis":
     uploaded_file_ce = st.sidebar.file_uploader("Upload 'Holdings3.xlsx'", type=['xlsx'], key="ce")
     
     if uploaded_file_ce:
-        with st.spinner("Processing Data & Fetching Benchmarks..."):
+        with st.spinner("Processing Data & Fetching Factors..."):
             res = load_cash_equity_data(uploaded_file_ce)
             df_perf, df_last, df_contrib, country_daily, logs, err = res
         
@@ -482,6 +518,7 @@ elif menu == "Cash Equity Analysis":
         elif df_perf is not None:
             start_dt, end_dt = df_perf.index.min(), df_perf.index.max()
             bm_returns = download_benchmarks_all(start_dt, end_dt)
+            factor_returns = download_factors(start_dt, end_dt)
             
             view_opt = st.radio("Currency View", ["KRW", "Local Currency (USD Base)"], horizontal=True)
             
@@ -516,10 +553,39 @@ elif menu == "Cash Equity Analysis":
                         fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=col+' BM', line=dict(width=1, dash='dash')))
             st.plotly_chart(fig, use_container_width=True)
 
-            t1, t2, t3 = st.tabs(["Factor Analysis (Alpha/Beta)", "Attribution (Selection)", "Holdings"])
+            t1, t2, t3, t4 = st.tabs(["Factor Risk & Attribution", "Selection Effect", "Holdings"])
             
             with t1:
-                st.markdown("#### 🌍 Country-Level Alpha & Beta")
+                st.markdown("#### 🧪 12-Factor Analysis (Risk & Attribution)")
+                if not factor_returns.empty:
+                    exposures, contrib, r2 = perform_factor_regression(target_ret, factor_returns)
+                    
+                    if exposures is not None:
+                        st.write(f"**R-Squared:** {r2:.2f} (Explained by Factors)")
+                        
+                        c_exp, c_attr = st.columns(2)
+                        with c_exp:
+                            st.markdown("**Factor Exposures (Beta)**")
+                            fig_exp = px.bar(exposures, orientation='h', labels={'value':'Beta', 'index':'Factor'})
+                            fig_exp.update_layout(showlegend=False)
+                            st.plotly_chart(fig_exp, use_container_width=True)
+                            
+                        with c_attr:
+                            st.markdown("**Cumulative Factor Attribution**")
+                            if not contrib.empty:
+                                contrib_cum = (1 + contrib).cumprod() - 1
+                                fig_attr = go.Figure()
+                                for col in contrib_cum.columns:
+                                    if col != 'Alpha' and col != 'Unexplained':
+                                        fig_attr.add_trace(go.Scatter(x=contrib_cum.index, y=contrib_cum[col], name=col))
+                                st.plotly_chart(fig_attr, use_container_width=True)
+                    else:
+                        st.warning("Insufficient data for regression (needs > 20 days).")
+                else:
+                    st.warning("Factor data download failed.")
+
+            with t2:
+                st.markdown("#### 🌍 Country-Level Alpha/Beta")
                 if not country_daily.empty and not bm_returns.empty:
                     results = []
                     for ctry in country_daily['Country'].unique():
@@ -529,28 +595,20 @@ elif menu == "Cash Equity Analysis":
                             alpha, beta, r2 = calculate_alpha_beta(port_c_ret, bm_returns[bm_key])
                             results.append({'Country': ctry, 'Benchmark': bm_key, 'Alpha': f"{alpha:.2%}", 'Beta': f"{beta:.2f}", 'R2': f"{r2:.2f}"})
                     if results: st.table(pd.DataFrame(results).set_index('Country'))
-                    else: st.write("Insufficient data for regression.")
+                    else: st.write("Insufficient data.")
 
-            with t2:
+                st.markdown("---")
                 st.markdown("#### 💹 Return Contribution (Selection Effect)")
                 if df_contrib:
                     c_a, c_b = st.columns(2)
                     with c_a:
                         if not df_contrib['Country'].empty:
-                            ctry_cont = df_contrib['Country'].groupby('Country')['Contrib_KRW'].sum().sort_values(ascending=False).reset_index()
-                            st.plotly_chart(px.bar(ctry_cont, x='Contrib_KRW', y='Country', orientation='h', title="By Country", text_auto='.2%'))
+                            ctry_cont = df_contrib['Country'].groupby('Country')['Contrib_KRW'].sum().reset_index()
+                            st.plotly_chart(px.bar(ctry_cont, x='Contrib_KRW', y='Country', orientation='h', title="Contribution by Country", text_auto='.2%'))
                     with c_b:
                         if not df_contrib['Sector'].empty:
-                            sec_cont = df_contrib['Sector'].groupby('섹터')['Contrib_KRW'].sum().sort_values(ascending=False).reset_index()
-                            st.plotly_chart(px.bar(sec_cont, x='Contrib_KRW', y='섹터', orientation='h', title="By Sector", text_auto='.2%'))
-                    
-                    st.markdown("#### 🥧 Current Allocation")
-                    max_date = df_perf.index.max()
-                    curr_hold = df_last[(df_last['기준일자'] == max_date) & (df_last['잔고수량'] > 0)]
-                    if not curr_hold.empty:
-                        ac, as_ = st.columns(2)
-                        with ac: st.plotly_chart(px.pie(curr_hold, values='원화평가금액', names='Country', title="Country Allocation"))
-                        with as_: st.plotly_chart(px.pie(curr_hold, values='원화평가금액', names='섹터', title="Sector Allocation"))
+                            sec_cont = df_contrib['Sector'].groupby('섹터')['Contrib_KRW'].sum().reset_index()
+                            st.plotly_chart(px.bar(sec_cont, x='Contrib_KRW', y='섹터', orientation='h', title="Contribution by Sector", text_auto='.2%'))
 
             with t3:
                 pnl_df = df_last.sort_values('Final_PnL', ascending=False)[['종목명','섹터','Country','Final_PnL']]
