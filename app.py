@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 import yfinance as yf
 from scipy import stats
-import datetime
 
 # --- Page Config ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
@@ -31,6 +30,7 @@ def fetch_sectors_cached(tickers):
 
 @st.cache_data
 def download_benchmarks_all(start_date, end_date):
+    """Download benchmarks for US, KR, HK, JP"""
     tickers = {'US': '^GSPC', 'KR': '^KS11', 'HK': '^HSI', 'JP': '^N225'}
     try:
         data = yf.download(list(tickers.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
@@ -46,6 +46,7 @@ def download_benchmarks_all(start_date, end_date):
 
 @st.cache_data
 def download_usdkrw(start_date, end_date):
+    """Download USD/KRW Exchange Rate"""
     try:
         fx = yf.download('KRW=X', start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
         if 'Adj Close' in fx.columns: fx = fx['Adj Close']
@@ -76,7 +77,6 @@ def download_cross_assets(start_date, end_date):
     except:
         return pd.DataFrame()
 
-# --- Factor Data Download ---
 @st.cache_data
 def download_factors(start_date, end_date):
     factors = {
@@ -104,14 +104,12 @@ def perform_factor_regression(port_ret, factor_ret):
         Y, X = df.iloc[:, 0].values, df.iloc[:, 1:].values
         X_w_const = np.column_stack([np.ones(len(X)), X])
         betas, residuals, rank, s = np.linalg.lstsq(X_w_const, Y, rcond=None)
-        
         names = ['Alpha'] + list(df.columns[1:])
         exposures = pd.Series(betas, index=names)
         contrib = pd.DataFrame(index=df.index)
         for i, f in enumerate(names[1:]): contrib[f] = df.iloc[:, 1+i] * betas[i+1]
         contrib['Alpha'] = betas[0]
         contrib['Unexplained'] = Y - (X_w_const @ betas)
-        
         ss_tot = np.sum((Y - np.mean(Y))**2)
         ss_res = np.sum(residuals) if len(residuals) > 0 else 0
         r2 = 1 - (ss_res / ss_tot)
@@ -150,7 +148,7 @@ def create_manual_html_table(df, title=None):
     return html
 
 # ==============================================================================
-# [PART 1] Team PNL Load
+# [PART 1] Team PNL Load (Preserved)
 # ==============================================================================
 @st.cache_data
 def load_team_pnl_data(file):
@@ -161,7 +159,6 @@ def load_team_pnl_data(file):
             if '일자' in [str(x).strip() for x in df_pnl_raw.iloc[i].values]:
                 h_idx = i; break
         if h_idx == -1: return None, None, "PNL Header Not Found"
-        
         raw_cols = df_pnl_raw.iloc[h_idx].tolist()
         new_cols = []
         seen = {}
@@ -170,7 +167,6 @@ def load_team_pnl_data(file):
             if c_str in ['nan', 'None', '']: continue
             if c_str in seen: seen[c_str] += 1; new_cols.append(f"{c_str}_{seen[c_str]}")
             else: seen[c_str] = 0; new_cols.append(c_str)
-            
         df_pnl = df_pnl_raw.iloc[h_idx+1:].copy()
         valid_indices = [i for i, c in enumerate(df_pnl_raw.iloc[h_idx]) if str(c).strip() not in ['nan', 'None', '']]
         df_pnl = df_pnl.iloc[:, valid_indices]
@@ -185,7 +181,6 @@ def load_team_pnl_data(file):
         for i in range(15):
             if '일자' in [str(x).strip() for x in df_pos_raw.iloc[i].values]:
                 h_idx_pos = i; break
-        
         raw_cols_pos = df_pos_raw.iloc[h_idx_pos].tolist()
         new_cols_pos = []
         seen_pos = {}
@@ -194,7 +189,6 @@ def load_team_pnl_data(file):
             if c_str in ['nan', 'None', '']: continue
             if c_str in seen_pos: seen_pos[c_str] += 1; new_cols_pos.append(f"{c_str}_{seen_pos[c_str]}")
             else: seen_pos[c_str] = 0; new_cols_pos.append(c_str)
-            
         df_pos = df_pos_raw.iloc[h_idx_pos+1:].copy()
         valid_indices_pos = [i for i, c in enumerate(df_pos_raw.iloc[h_idx_pos]) if str(c).strip() not in ['nan', 'None', '']]
         df_pos = df_pos.iloc[:, valid_indices_pos]
@@ -203,12 +197,11 @@ def load_team_pnl_data(file):
         df_pos = df_pos.set_index(date_col_pos)
         df_pos.index = pd.to_datetime(df_pos.index, errors='coerce')
         df_pos = df_pos.dropna(how='all').apply(pd.to_numeric, errors='coerce').fillna(0)
-
         return df_pnl, df_pos, None
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load
+# [PART 2] Cash Equity Load (Returns 7 Values)
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -219,7 +212,6 @@ def load_cash_equity_data(file):
         df_hedge = pd.DataFrame()
         
         for sheet in xls.sheet_names:
-            # Hedge
             if 'hedge' in sheet.lower() or '헷지' in sheet:
                 try:
                     df_h = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -239,7 +231,6 @@ def load_cash_equity_data(file):
                             if df_hedge.empty: df_hedge = daily_hedge.to_frame(name='Hedge_PnL_KRW')
                             else: df_hedge = df_hedge.add(daily_hedge.to_frame(name='Hedge_PnL_KRW'), fill_value=0)
                 except: pass
-            # Equity
             else:
                 try:
                     df = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -290,7 +281,6 @@ def load_cash_equity_data(file):
             eq['Country'] = eq['통화'].map(curr_map).fillna('Other')
         else: eq['Country'] = 'Other'
 
-        # Full Grid
         all_dates = sorted(eq['기준일자'].unique())
         all_tickers = eq['Ticker_ID'].unique()
         idx = pd.MultiIndex.from_product([all_dates, all_tickers], names=['기준일자', 'Ticker_ID'])
@@ -310,11 +300,9 @@ def load_cash_equity_data(file):
         for c in ['통화', '섹터', 'Country', '종목명']:
             if c in merged.columns: merged[c] = merged.groupby('Ticker_ID')[c].ffill().fillna('Unknown')
 
-        # Returns
         merged['Cum_PnL_KRW'] = merged['원화총평가손익'] + merged['원화총매매손익']
         merged['Daily_PnL_KRW'] = merged.groupby('Ticker_ID')['Cum_PnL_KRW'].diff().fillna(0)
         
-        # FX
         if 'Market_Value' in merged.columns:
             merged['Implied_FX'] = np.where((merged['원화평가금액']!=0) & (merged['Market_Value']!=0),
                                             merged['원화평가금액']/merged['Market_Value'], 0)
@@ -329,44 +317,28 @@ def load_cash_equity_data(file):
         
         merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
         
-        # Aggregation
         daily_agg = merged.groupby('기준일자').agg({
             'Daily_PnL_KRW': 'sum',
             '원화평가금액': 'sum',
             'Prev_MV_KRW': 'sum'
         }).rename(columns={'원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
         
-        # Contribution Data (Safe Division)
         merged = merged.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
-        
-        # [FIXED] Split into multiple lines to avoid SyntaxError
-        cond = merged['Day_Total_Prev'] > 0
-        val = merged['Daily_PnL_KRW'] / merged['Day_Total_Prev']
-        merged['Contrib_KRW'] = np.where(cond, val, 0)
+        merged['Contrib_KRW'] = np.where(merged['Day_Total_Prev'] > 0, 
+                                         merged['Daily_PnL_KRW'] / merged['Day_Total_Prev'], 0)
         
         contrib_sector = merged.groupby(['기준일자', '섹터'])['Contrib_KRW'].sum().reset_index()
         contrib_country = merged.groupby(['기준일자', 'Country'])['Contrib_KRW'].sum().reset_index()
         
-        # Portfolio FX Return
         merged['Weight'] = np.where(merged['Day_Total_Prev']>0, merged['Prev_MV_KRW']/merged['Day_Total_Prev'], 0)
+        daily_fx_ret = merged.groupby('기준일자').apply(lambda x: (x['FX_Ret'] * x['Weight']).sum()).rename('Port_FX_Ret')
         
-        # [FIXED] Split lambda to avoid syntax issues
-        def weighted_sum(x):
-            return (x['FX_Ret'] * x['Weight']).sum()
-            
-        daily_fx_ret = merged.groupby('기준일자').apply(weighted_sum).rename('Port_FX_Ret')
-        
-        # Country Returns
-        country_agg = merged.groupby(['기준일자', 'Country']).agg({
+        country_daily = merged.groupby(['기준일자', 'Country']).agg({
             'Daily_PnL_KRW': 'sum', 'Prev_MV_KRW': 'sum'
         }).reset_index()
-        
-        # [FIXED] Safe Division
-        c_cond = country_agg['Prev_MV_KRW'] > 0
-        c_val = country_agg['Daily_PnL_KRW'] / country_agg['Prev_MV_KRW']
-        country_agg['Country_Ret'] = np.where(c_cond, c_val, 0)
+        country_daily['Country_Ret'] = np.where(country_daily['Prev_MV_KRW']>0, 
+                                                country_daily['Daily_PnL_KRW']/country_daily['Prev_MV_KRW'], 0)
 
-        # Final Merge
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
         df_perf = df_perf.join(daily_fx_ret, how='left').fillna(0)
         
@@ -377,7 +349,6 @@ def load_cash_equity_data(file):
         
         df_perf['Hedge_PnL_USD'] = df_perf['Hedge_PnL_KRW'] / df_perf['USD_KRW']
         df_perf['Total_Prev_MV_USD'] = df_perf['Total_Prev_MV_KRW'] / df_perf['USD_KRW']
-        
         df_perf['Total_PnL_KRW'] = df_perf['Daily_PnL_KRW'] + df_perf['Hedge_PnL_KRW']
         
         denom_krw = df_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
@@ -399,10 +370,11 @@ def load_cash_equity_data(file):
         df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
         
-        # Return 7 Values
-        return df_perf, df_last, {'Sector':contrib_sector, 'Country':contrib_country}, country_agg, merged, debug_logs, None
+        # Return 7 Values exactly
+        return df_perf, df_last, {'Sector':contrib_sector, 'Country':contrib_country}, country_daily, merged, debug_logs, None
 
     except Exception as e:
+        # Return 7 Values in Exception
         return None, None, None, None, None, None, f"Process Error: {e}"
 
 
@@ -491,7 +463,8 @@ elif menu == "Cash Equity Analysis":
     if uploaded_file_ce:
         with st.spinner("Processing Data & Fetching Factors..."):
             res = load_cash_equity_data(uploaded_file_ce)
-            df_perf, df_last, df_contrib, country_daily, logs, err, _ = res
+            # Unpack 7 values
+            df_perf, df_last, df_contrib, country_daily, logs, debug_logs, err = res
         
         if err: st.error(err)
         elif df_perf is not None:
@@ -604,7 +577,8 @@ elif menu == "📑 Weekly Report Generator":
     if uploaded_file_ce:
         with st.spinner("Generating Report Data..."):
             res = load_cash_equity_data(uploaded_file_ce)
-            df_perf, df_last, df_contrib, country_daily, df_daily_stock, logs, err, _ = res
+            # Correct Unpacking: 7 items
+            df_perf, df_last, df_contrib, country_daily, df_daily_stock, logs, err = res
             
         if err: st.error(err)
         elif df_perf is not None:
@@ -644,7 +618,8 @@ elif menu == "📑 Weekly Report Generator":
                     sub_f = factor_contrib_cut[factor_contrib_cut.index >= start_dt]
                     if not sub_f.empty:
                         f_cont = sub_f.apply(lambda x: (1+x).prod()-1).sort_values(ascending=False)
-                return {'label': label, 'ret': cum_ret, 'pnl': abs_pnl, 'top5': top5, 'bot5': bot5, 'ctry': ctry_contrib, 'sect': sect_contrib, 'factor': f_cont}
+                return {'label': label, 'ret': cum_ret, 'pnl': abs_pnl, 'top5': top5, 'bot5': bot5, 
+                        'ctry': ctry_contrib, 'sect': sect_contrib, 'factor': f_cont}
 
             tabs = st.tabs(["Summary Report", "WTD", "MTD", "QTD", "YTD"])
             stats_res = {}
@@ -656,10 +631,12 @@ elif menu == "📑 Weekly Report Generator":
                         c1, c2 = st.columns(2)
                         c1.metric("Return", f"{stats_res[p]['ret']:.2%}")
                         c2.metric("PnL (KRW)", f"{stats_res[p]['pnl']:,.0f}")
+                        
                         st.markdown("#### Top Contributors")
                         c3, c4 = st.columns(2)
                         with c3: st.table(stats_res[p]['top5'][['종목명', 'Contrib_KRW']].style.format({'Contrib_KRW': '{:.2%}'}))
                         with c4: st.table(stats_res[p]['bot5'][['종목명', 'Contrib_KRW']].style.format({'Contrib_KRW': '{:.2%}'}))
+                        
                         st.markdown("#### Attribution Analysis")
                         col_a, col_b, col_c = st.columns(3)
                         with col_a:
