@@ -1264,9 +1264,21 @@ elif menu == "Swap Report":
             scopes = list(set(GMAIL_SCOPES + DRIVE_SCOPES))
             try:
                 flow = InstalledAppFlow.from_client_config(info, scopes=scopes)
-                flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+                # Use a redirect URI that is actually registered in the client secret.
+                redirect_uris = []
+                if "installed" in info:
+                    redirect_uris = info.get("installed", {}).get("redirect_uris", []) or []
+                elif "web" in info:
+                    redirect_uris = info.get("web", {}).get("redirect_uris", []) or []
+                if redirect_uris:
+                    flow.redirect_uri = redirect_uris[0]
                 auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
                 st.markdown(f"1) Click to authorize: {auth_url}")
+                if redirect_uris:
+                    st.caption(
+                        f"After approval, you'll be redirected to `{redirect_uris[0]}`. "
+                        "Copy the `code=` value from the browser URL and paste it below."
+                    )
                 code = st.text_input("2) Paste authorization code", key="swap_report_auth_code")
                 if st.button("3) Finish authorization", key="swap_report_finish_auth"):
                     if not code:
