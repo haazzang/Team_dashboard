@@ -1264,27 +1264,50 @@ elif menu == "Swap Report":
             scopes = list(set(GMAIL_SCOPES + DRIVE_SCOPES))
             try:
                 flow = InstalledAppFlow.from_client_config(info, scopes=scopes)
-                # Use a redirect URI that is actually registered in the client secret.
+                # Use a redirect URI that is registered AND not the deprecated OOB flow when possible.
                 redirect_uris = []
                 if "installed" in info:
                     redirect_uris = info.get("installed", {}).get("redirect_uris", []) or []
                 elif "web" in info:
                     redirect_uris = info.get("web", {}).get("redirect_uris", []) or []
-                if redirect_uris:
-                    flow.redirect_uri = redirect_uris[0]
+
+                preferred_redirect = None
+                for uri in redirect_uris:
+                    if uri.startswith("http://localhost") or uri.startswith("http://127.0.0.1"):
+                        preferred_redirect = uri
+                        break
+                if preferred_redirect is None:
+                    for uri in redirect_uris:
+                        if not uri.startswith("urn:ietf:wg:oauth:2.0:oob"):
+                            preferred_redirect = uri
+                            break
+                if preferred_redirect:
+                    flow.redirect_uri = preferred_redirect
+
                 auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
                 st.markdown(f"1) Click to authorize: {auth_url}")
-                if redirect_uris:
+                if preferred_redirect:
                     st.caption(
-                        f"After approval, you'll be redirected to `{redirect_uris[0]}`. "
-                        "Copy the `code=` value from the browser URL and paste it below."
+                        f"After approval, you'll be redirected to `{preferred_redirect}`. "
+                        "Copy ONLY the `code=` value from the browser URL and paste it below."
                     )
-                code = st.text_input("2) Paste authorization code", key="swap_report_auth_code")
+                elif redirect_uris:
+                    st.warning(
+                        "Your client secret only has OOB redirect URIs. "
+                        "Google often blocks this flow; if it fails, generate an authorized_user JSON with a refresh_token offline."
+                    )
+
+                raw_code = st.text_input("2) Paste authorization code or full redirect URL", key="swap_report_auth_code")
                 if st.button("3) Finish authorization", key="swap_report_finish_auth"):
-                    if not code:
+                    if not raw_code:
                         st.warning("Please paste the authorization code first.")
                     else:
                         try:
+                            code = raw_code.strip()
+                            if "code=" in code:
+                                code = code.split("code=", 1)[1]
+                                code = code.split("&", 1)[0]
+                            code = code.strip()
                             flow.fetch_token(code=code)
                             creds = flow.credentials
                             user_info = {
@@ -1304,6 +1327,10 @@ elif menu == "Swap Report":
                             st.rerun()
                         except Exception as e:
                             st.error(f"Authorization failed: {e}")
+                            st.info(
+                                "Tip: authorization codes are single-use and expire quickly. "
+                                "Re-open the auth link, approve again, and paste the fresh `code=` value."
+                            )
             except Exception as e:
                 st.error(f"Failed to start OAuth flow: {e}")
 
