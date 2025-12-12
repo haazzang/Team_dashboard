@@ -5,13 +5,38 @@ import plotly.graph_objects as go
 import plotly.express as px
 import yfinance as yf
 from scipy import stats
+import json
+import os
+from io import BytesIO
+import base64
+from datetime import datetime, timezone
+
+try:
+    from google.oauth2.credentials import Credentials
+    from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaIoBaseUpload
+except ModuleNotFoundError:
+    Credentials = None
+    ServiceAccountCredentials = None
+    Request = None
+    build = None
+    HttpError = Exception
+    MediaIoBaseUpload = None
+
+try:
+    import openai
+except ModuleNotFoundError:
+    openai = None  # Streamlit UI still loads; AI report generation will prompt to install
 
 # --- Page Config ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
-st.title("🚀 Team Portfolio Analysis Dashboard")
+st.title("Team Portfolio Analysis Dashboard")
 
 # ==============================================================================
-# [Helper Functions]
+# [Helper Functions] - Fixed Timezone Issues
 # ==============================================================================
 @st.cache_data
 def fetch_sectors_cached(tickers):
@@ -40,6 +65,10 @@ def download_benchmarks_all(start_date, end_date):
         
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
+        # [FIX] Remove Timezone
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+            
         inv_map = {v: k for k, v in tickers.items()}
         df.rename(columns=inv_map, inplace=True)
         return df.ffill().pct_change().fillna(0)
@@ -55,6 +84,10 @@ def download_usdkrw(start_date, end_date):
         elif 'Close' in fx.columns: fx = fx['Close']
         
         if isinstance(fx.columns, pd.MultiIndex): fx.columns = fx.columns.get_level_values(0)
+        
+        # [FIX] Remove Timezone
+        if isinstance(fx.index, pd.DatetimeIndex) and fx.index.tz is not None:
+            fx.index = fx.index.tz_localize(None)
         
         if isinstance(fx, pd.Series): 
             fx = fx.to_frame(name='USD_KRW')
@@ -79,8 +112,13 @@ def download_cross_assets(start_date, end_date):
         elif 'Close' in data.columns: df = data['Close']
         else: df = data
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        
+        # [FIX] Remove Timezone
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
         df.rename(columns={v: k for k, v in assets.items()}, inplace=True)
-        return df
+        return df # Returns Prices
     except:
         return pd.DataFrame()
 
@@ -99,9 +137,35 @@ def download_factors(start_date, end_date):
         elif 'Close' in data.columns: df = data['Close']
         else: df = data
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        
+        # [FIX] Remove Timezone
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
         inv_map = {v: k for k, v in factors.items()}
         df.rename(columns=inv_map, inplace=True)
         return df.ffill().pct_change().fillna(0)
+    except:
+        return pd.DataFrame()
+
+@st.cache_data
+def download_global_indices(start_date, end_date):
+    """Download global index prices for report context"""
+    indices = {'SPX': '^GSPC', 'Hang Seng': '^HSI', 'Nikkei 225': '^N225', 'ACWI': 'ACWI'}
+    try:
+        data = yf.download(list(indices.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
+        if 'Adj Close' in data.columns: df = data['Adj Close']
+        elif 'Close' in data.columns: df = data['Close']
+        else: df = data
+
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        
+        # Align timezone handling with rest of app
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        
+        df.rename(columns={v: k for k, v in indices.items()}, inplace=True)
+        return df.ffill()
     except:
         return pd.DataFrame()
 
@@ -156,6 +220,412 @@ def create_manual_html_table(df, title=None):
         html += '</tr>'
     html += '</tbody></table></div>'
     return html
+
+
+# ==============================================================================
+# [AI Helper Functions: OpenAI & DeepSeek]
+# ==============================================================================
+def get_openai_api_key():
+    """Resolve OpenAI API key, preferring the sidebar input (user-provided)."""
+    if openai is None:
+        return None
+    api_key = st.sidebar.text_input(
+        '🔑 OpenAI API Key',
+        type='password',
+        help='Key is used only for report generation. Set OPENAI_API_KEY env/secret or enter here.',
+        key='openai_api_key_input',
+    )
+    if api_key:
+        openai.api_key = api_key
+        return api_key
+
+    if getattr(openai, 'api_key', None):
+        return openai.api_key
+
+    try:
+        if hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets:
+            api_key = st.secrets['OPENAI_API_KEY']
+    except Exception:
+        api_key = None
+    if not api_key:
+        api_key = os.environ.get('OPENAI_API_KEY', '')
+    if api_key:
+        openai.api_key = api_key
+    return api_key
+
+
+def get_deepseek_api_key():
+    """Resolve DeepSeek API key (sidebar input first)."""
+    api_key = st.sidebar.text_input(
+        '🧠 DeepSeek API Key',
+        type='password',
+        help='Key is used only for report generation. Set DEEPSEEK_API_KEY env/secret or enter here.',
+        key='deepseek_api_key_input',
+    )
+    if api_key:
+        return api_key
+    try:
+        if hasattr(st, 'secrets') and 'DEEPSEEK_API_KEY' in st.secrets:
+            api_key = st.secrets['DEEPSEEK_API_KEY']
+    except Exception:
+        api_key = None
+    if not api_key:
+        api_key = os.environ.get('DEEPSEEK_API_KEY', '')
+    return api_key
+
+
+def _build_openai_compatible_client(api_key, base_url=None):
+    """Return a client compatible with both openai>=1.0 and <=0.28 styles."""
+    if openai is None:
+        return None
+    try:
+        from openai import OpenAI  # type: ignore
+        return OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+    except Exception:
+        openai.api_key = api_key
+        if base_url:
+            openai.api_base = base_url
+        return openai
+
+
+def _translate_openai_error(err, provider="openai"):
+    """Map OpenAI/DeepSeek errors to clearer, user-facing messages."""
+    msg = str(err)
+    lower = msg.lower()
+    if "insufficient_balance" in lower or "insufficient balance" in lower or "error code: 402" in lower:
+        return RuntimeError(f"{provider.capitalize()} balance/credit is exhausted. Please top up or use another API key.")
+    if "insufficient_quota" in lower or "exceeded your current quota" in lower:
+        return RuntimeError(f"{provider.capitalize()} quota exceeded. Please check plan/billing or try another API key.")
+    if "invalid_api_key" in lower or "incorrect api key" in lower:
+        return RuntimeError("Invalid API key. Please re-enter a valid key in the sidebar.")
+    return err if isinstance(err, RuntimeError) else RuntimeError(msg)
+
+
+def _serialize_stats_for_gpt(stats_res):
+    out = {}
+    for period, d in stats_res.items():
+        if not d:
+            continue
+        try:
+            top5 = d.get('top5')
+            bot5 = d.get('bot5')
+            ctry = d.get('ctry')
+            sect = d.get('sect')
+            factor = d.get('factor')
+            idx = d.get('indices')
+            out[period] = {
+                'label': d.get('label'),
+                'total_return': float(d.get('ret', 0.0)),
+                'total_pnl_krw': float(d.get('pnl', 0.0)),
+                'top5_contributors': top5.to_dict(orient='records') if hasattr(top5, 'to_dict') and not top5.empty else [],
+                'bottom5_detractors': bot5.to_dict(orient='records') if hasattr(bot5, 'to_dict') and not bot5.empty else [],
+                'country_contrib': ctry.to_dict() if hasattr(ctry, 'to_dict') else {},
+                'sector_contrib': sect.to_dict() if hasattr(sect, 'to_dict') else {},
+                'factor_contrib': factor.to_dict() if hasattr(factor, 'to_dict') else {},
+                'indices_return': idx.to_dict() if hasattr(idx, 'to_dict') else {},
+            }
+        except Exception:
+            continue
+    return out
+
+
+def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider='openai', language='English'):
+    """Generate weekly report via selected LLM provider."""
+    if provider == 'deepseek':
+        api_key = get_deepseek_api_key()
+        base_url = 'https://api.deepseek.com'
+        model = 'deepseek-chat'
+    else:
+        api_key = get_openai_api_key()
+        base_url = None
+        model = 'gpt-4o-mini'
+
+    if not api_key:
+        raise RuntimeError("API key is missing. Please enter it in the sidebar.")
+
+    client = _build_openai_compatible_client(api_key, base_url=base_url)
+    if client is None:
+        raise RuntimeError("OpenAI-compatible client not available. Install the 'openai' package.")
+
+    payload = _serialize_stats_for_gpt(stats_res)
+    system_prompt = (
+        "You are a professional global equity long-short hedge fund PM and quant alpha researcher. "
+        "You write weekly performance reports that are analytical, data-driven, and concise. "
+        "You NEVER invent numbers; you only interpret the structured data you are given. "
+        "Assume the base currency is KRW. The audience is an internal investment committee."
+    )
+    comment_block = ""
+    if user_comment:
+        comment_block = (
+            "\n\nAdditional PM comments (can be Korean or English, keep the intent but clean up the wording):\n"
+            + user_comment
+        )
+    norm_lang = language.strip().lower()
+    is_korean = norm_lang.startswith("ko") or "한국" in norm_lang or "korean" in norm_lang or norm_lang == "kr"
+    lang_hint = "Write the full report in Korean." if is_korean else "Write the full report in English."
+
+    user_prompt = (
+        f"Today is the weekly review for the portfolio, with performance measured up to {report_date.date()}.\n"
+        "Here is the structured performance & attribution data for WTD, MTD, QTD, and YTD in JSON format.\n"
+        "Use ONLY this information to write a full weekly report. Do not fabricate any new figures.\n\n"
+        f"Structured data:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        f"{comment_block}\n\n"
+        "Your report MUST be structured in the following sections:\n"
+        "1) Market & Macro Overview (very short, based only on factor/index performance you see in the data)\n"
+        "2) Portfolio Performance Summary (WTD, MTD, QTD, YTD vs indices)\n"
+        "3) Attribution (by country, sector, factor, and key single names from top/bottom contributors)\n"
+        "4) Risk & Volatility Review (beta/volatility impressions inferred from patterns in returns; call out realized volatility, drawdowns, and Sharpe-style risk-adjusted performance)\n"
+        "5) PM Action Items / Portfolio Changes (what to add, trim, hedge, or monitor, qualitatively)\n"
+        "6) Quant / Signal Perspective (what seems to work: momentum, mean-reversion, factor tilts, etc.).\n"
+        "Write in a clear, bullet-point friendly style suitable for a weekly investment meeting note.\n"
+        f"{lang_hint}"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        return resp.choices[0].message.content.strip()
+    except AttributeError:
+        try:
+            resp = client.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+            )
+            return resp["choices"][0]["message"]["content"].strip()
+        except Exception as e_old:
+            raise _translate_openai_error(e_old, provider)
+    except Exception as e_new:
+        raise _translate_openai_error(e_new, provider)
+
+
+# ==============================================================================
+# [Gmail -> Drive Swap Report Sync]
+# ==============================================================================
+GMAIL_QUERY_DEFAULT = 'subject:"JMLNKWGE Synthetic Portfolio EOD Report" has:attachment filename:xlsx'
+GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive']
+SWAP_REPORT_FOLDER_DEFAULT = "Swap Report"
+
+
+def _get_secret_or_env(key, default=None):
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+def get_google_credentials(scopes):
+    """
+    Build Google credentials.
+    Priority:
+    1) Uploaded JSON (service account or authorized_user)
+    2) Secrets/env refresh token (OAuth)
+    """
+    if Credentials is None:
+        return None
+
+    uploaded_info = st.session_state.get("google_api_json")
+    if uploaded_info:
+        try:
+            if uploaded_info.get("type") == "service_account" and ServiceAccountCredentials is not None:
+                return ServiceAccountCredentials.from_service_account_info(uploaded_info, scopes=scopes)
+            return Credentials.from_authorized_user_info(uploaded_info, scopes=scopes)
+        except Exception:
+            pass
+
+    client_id = _get_secret_or_env("GMAIL_CLIENT_ID")
+    client_secret = _get_secret_or_env("GMAIL_CLIENT_SECRET")
+    refresh_token = _get_secret_or_env("GMAIL_REFRESH_TOKEN")
+    token_uri = _get_secret_or_env("GMAIL_TOKEN_URI", "https://oauth2.googleapis.com/token")
+    if not (client_id and client_secret and refresh_token):
+        return None
+
+    creds = Credentials(
+        None,
+        refresh_token=refresh_token,
+        token_uri=token_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=scopes,
+    )
+    if Request is not None:
+        try:
+            if not creds.valid:
+                creds.refresh(Request())
+        except Exception:
+            return None
+    return creds
+
+
+@st.cache_resource(ttl=3600, show_spinner=False)
+def get_google_service(service_name, version, scopes):
+    creds = get_google_credentials(scopes)
+    if creds is None or build is None:
+        return None
+    try:
+        return build(service_name, version, credentials=creds, cache_discovery=False)
+    except Exception:
+        return None
+
+
+def _walk_gmail_parts(parts):
+    for p in parts or []:
+        yield p
+        if p.get("parts"):
+            yield from _walk_gmail_parts(p.get("parts"))
+
+
+def fetch_gmail_excel_attachments(query=None, max_messages=50):
+    """Fetch Excel attachments from Gmail matching query."""
+    q = query or _get_secret_or_env("GMAIL_QUERY", GMAIL_QUERY_DEFAULT)
+    gmail = get_google_service("gmail", "v1", list(set(GMAIL_SCOPES + DRIVE_SCOPES)))
+    if gmail is None:
+        return [], "Gmail credentials not configured."
+
+    try:
+        res = gmail.users().messages().list(userId="me", q=q, maxResults=max_messages).execute()
+        messages = res.get("messages", []) or []
+    except HttpError as e:
+        return [], f"Gmail API error: {e}"
+    except Exception as e:
+        return [], f"Gmail API error: {e}"
+
+    attachments = []
+    for m in messages:
+        msg_id = m.get("id")
+        if not msg_id:
+            continue
+        try:
+            msg = gmail.users().messages().get(userId="me", id=msg_id, format="full").execute()
+        except Exception:
+            continue
+
+        internal_ms = int(msg.get("internalDate", "0") or 0)
+        received_at = datetime.fromtimestamp(internal_ms / 1000.0, tz=timezone.utc) if internal_ms else None
+
+        payload = msg.get("payload", {}) or {}
+        parts = payload.get("parts", []) or []
+
+        for part in _walk_gmail_parts(parts):
+            filename = part.get("filename") or ""
+            if not filename.lower().endswith((".xlsx", ".xls")):
+                continue
+
+            att_id = (part.get("body") or {}).get("attachmentId")
+            if not att_id:
+                continue
+
+            try:
+                att = gmail.users().messages().attachments().get(
+                    userId="me", messageId=msg_id, id=att_id
+                ).execute()
+                data = att.get("data")
+                if not data:
+                    continue
+                file_bytes = base64.urlsafe_b64decode(data.encode("utf-8"))
+            except Exception:
+                continue
+
+            attachments.append(
+                {
+                    "message_id": msg_id,
+                    "attachment_id": att_id,
+                    "filename": filename,
+                    "bytes": file_bytes,
+                    "received_at": received_at,
+                }
+            )
+
+    attachments.sort(key=lambda x: x.get("received_at") or datetime.min.replace(tzinfo=timezone.utc))
+    return attachments, None
+
+
+def get_or_create_drive_folder(drive, folder_name):
+    """Find a Drive folder by name; create if missing."""
+    if drive is None:
+        return None
+    try:
+        q = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+        res = drive.files().list(q=q, fields="files(id, name)", pageSize=5).execute()
+        files = res.get("files", []) or []
+        if files:
+            return files[0]["id"]
+        meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
+        created = drive.files().create(body=meta, fields="id").execute()
+        return created.get("id")
+    except Exception:
+        return None
+
+
+def drive_file_exists(drive, folder_id, filename):
+    try:
+        q = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
+        res = drive.files().list(q=q, fields="files(id)", pageSize=1).execute()
+        return bool(res.get("files"))
+    except Exception:
+        return False
+
+
+def upload_excel_as_sheet(drive, folder_id, filename, file_bytes):
+    """Upload an Excel file to Drive and convert to Google Sheets."""
+    if drive is None or MediaIoBaseUpload is None:
+        return None
+    media = MediaIoBaseUpload(BytesIO(file_bytes), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", resumable=False)
+    body = {
+        "name": filename.rsplit(".", 1)[0],
+        "parents": [folder_id],
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+    }
+    return drive.files().create(body=body, media_body=media, fields="id").execute()
+
+
+def sync_swap_reports_to_drive(query=None, max_messages=50, folder_name=None):
+    """
+    Fetch Gmail Excel attachments and save them to Drive folder as Google Sheets.
+    Returns (uploaded_count, skipped_count, error_message).
+    """
+    folder_name = folder_name or _get_secret_or_env("SWAP_REPORT_FOLDER", SWAP_REPORT_FOLDER_DEFAULT)
+    drive = get_google_service("drive", "v3", list(set(GMAIL_SCOPES + DRIVE_SCOPES)))
+    if drive is None:
+        return 0, 0, "Drive credentials not configured."
+
+    attachments, err = fetch_gmail_excel_attachments(query=query, max_messages=max_messages)
+    if err:
+        return 0, 0, err
+
+    folder_id = get_or_create_drive_folder(drive, folder_name)
+    if not folder_id:
+        return 0, 0, "Failed to access or create Drive folder."
+
+    uploaded = 0
+    skipped = 0
+    for a in attachments:
+        filename = a["filename"]
+        if drive_file_exists(drive, folder_id, filename.rsplit(".", 1)[0]):
+            skipped += 1
+            continue
+        try:
+            upload_excel_as_sheet(drive, folder_id, filename, a["bytes"])
+            uploaded += 1
+        except Exception:
+            continue
+
+    return uploaded, skipped, None
+
 
 # ==============================================================================
 # [PART 1] Team PNL Load
@@ -216,7 +686,7 @@ def load_team_pnl_data(file):
     except Exception as e: return None, None, f"Team PNL Error: {e}"
 
 # ==============================================================================
-# [PART 2] Cash Equity Load (With Column Deduplication)
+# [PART 2] Cash Equity Load
 # ==============================================================================
 @st.cache_data
 def load_cash_equity_data(file):
@@ -227,7 +697,6 @@ def load_cash_equity_data(file):
         df_hedge = pd.DataFrame()
         
         for sheet in xls.sheet_names:
-            # [A] Hedge
             if 'hedge' in sheet.lower() or '헷지' in sheet:
                 try:
                     df_h = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -236,7 +705,6 @@ def load_cash_equity_data(file):
                         if '기준일자' in [str(x).strip() for x in df_h.iloc[i].values]:
                             h_idx = i; break
                     if h_idx != -1:
-                        # Deduplicate Cols
                         raw_cols = [str(c).strip() for c in df_h.iloc[h_idx]]
                         new_cols = []
                         seen = {}
@@ -254,7 +722,6 @@ def load_cash_equity_data(file):
                             if df_hedge.empty: df_hedge = daily_hedge.to_frame(name='Hedge_PnL_KRW')
                             else: df_hedge = df_hedge.add(daily_hedge.to_frame(name='Hedge_PnL_KRW'), fill_value=0)
                 except: pass
-            # [B] Equity
             else:
                 try:
                     df = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
@@ -264,7 +731,6 @@ def load_cash_equity_data(file):
                         if '기준일자' in row_vals and ('종목명' in row_vals or '종목코드' in row_vals):
                             h_idx = i; break
                     if h_idx != -1:
-                        # Deduplicate Cols
                         raw_cols = [str(c).strip() for c in df.iloc[h_idx]]
                         new_cols = []
                         seen = {}
@@ -276,7 +742,7 @@ def load_cash_equity_data(file):
                         if '기준일자' in df.columns: all_holdings.append(df)
                 except: pass
 
-        if not all_holdings: return None, None, None, None, None, "Holdings 데이터 없음"
+        if not all_holdings: return None, None, None, None, None, None, "Holdings 데이터 없음"
 
         eq = pd.concat(all_holdings, ignore_index=True)
         eq['기준일자'] = pd.to_datetime(eq['기준일자'], errors='coerce')
@@ -395,17 +861,19 @@ def load_cash_equity_data(file):
         df_last = eq.sort_values('기준일자').groupby('Ticker_ID').tail(1)
         df_last['Final_PnL'] = df_last['원화총평가손익'] + df_last['원화총매매손익']
         
-        return df_perf, df_last, {'Sector':contrib_sector, 'Country':contrib_country}, country_daily, debug_logs, None
+        return df_perf, df_last, {'Sector':contrib_sector, 'Country':contrib_country}, country_daily, merged, debug_logs, None
 
     except Exception as e:
-        return None, None, None, None, None, f"Process Error: {e}"
+        return None, None, None, None, None, None, f"Process Error: {e}"
 
 
 # ==============================================================================
 # [MAIN UI]
 # ==============================================================================
-
-menu = st.sidebar.radio("Dashboard Menu", ["Total Portfolio (Team PNL)", "Cash Equity Analysis"])
+menu = st.sidebar.radio(
+    "Dashboard Menu",
+    ["Total Portfolio (Team PNL)", "Cash Equity Analysis", "📑 Weekly Report Generator", "Swap Report"],
+)
 
 if menu == "Total Portfolio (Team PNL)":
     st.subheader("📊 Total Team Portfolio Dashboard")
@@ -423,34 +891,39 @@ if menu == "Total Portfolio (Team PNL)":
             df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             
-            with st.spinner("Fetching Market Data..."):
-                df_assets = download_cross_assets(df_pnl.index.min(), df_pnl.index.max())
-                bm_cum = pd.DataFrame(index=df_user_ret.index)
-                if not df_assets.empty:
-                    df_assets = df_assets.reindex(df_user_ret.index, method='ffill')
-                    df_asset_ret = df_assets.pct_change().fillna(0)
-                    if 'S&P 500' in df_assets.columns: bm_cum['SPX'] = (1 + df_asset_ret['S&P 500']).cumprod() - 1
-                    if 'KOSPI' in df_assets.columns: bm_cum['KOSPI'] = (1 + df_asset_ret['KOSPI']).cumprod() - 1
-            
             t1, t2, t3, t4, t5 = st.tabs(["📈 Chart", "📊 Analysis", "🔗 Correlation", "🌍 Cross Asset", "🧪 Simulation"])
             
             with t1:
                 strat = st.selectbox("Select Strategy", df_user_ret.columns)
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=df_user_ret.index, y=df_user_ret[strat], name=strat, line=dict(width=2)))
+                
+                # Add Benchmarks
+                bm_returns = download_benchmarks_all(df_pnl.index.min(), df_pnl.index.max())
+                if not bm_returns.empty:
+                    bm_cum = (1 + bm_returns).cumprod() - 1
+                    for col in ['US', 'KR']:
+                         if col in bm_cum.columns:
+                            fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=f"{col} BM", line=dict(width=1, dash='dash')))
                 st.plotly_chart(fig, use_container_width=True)
             
             with t2:
                 stats = pd.DataFrame(index=df_daily_ret.columns)
                 stats['Volatility'] = df_daily_ret.std() * np.sqrt(252)
                 stats['Sharpe'] = (df_daily_ret.mean() / df_daily_ret.std() * np.sqrt(252)).fillna(0)
-                nav = (1 + df_daily_ret).cumprod()
-                stats['MDD'] = ((nav - nav.cummax()) / nav.cummax()).min()
+                stats['Win Rate'] = (df_daily_ret > 0).sum() / (df_daily_ret != 0).sum()
+                
+                # Profit Factor
+                gp = df_daily_ret[df_daily_ret > 0].sum()
+                gl = df_daily_ret[df_daily_ret < 0].sum().abs()
+                stats['Profit Factor'] = (gp / gl).fillna(0)
+                
+                stats['MDD'] = ((1+df_daily_ret).cumprod() / (1+df_daily_ret).cumprod().cummax() - 1).min()
                 stats['Total Return'] = df_user_ret.iloc[-1]
                 
                 disp = stats.copy()
                 for c in disp.columns:
-                    if c == 'Sharpe': disp[c] = disp[c].apply(lambda x: f"{x:.2f}")
+                    if c in ['Sharpe', 'Profit Factor']: disp[c] = disp[c].apply(lambda x: f"{x:.2f}")
                     else: disp[c] = disp[c].apply(lambda x: f"{x:.2%}")
                 
                 disp.insert(0, 'Strategy', disp.index)
@@ -461,14 +934,17 @@ if menu == "Total Portfolio (Team PNL)":
                 corr = df_daily_ret.corr()
                 fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.index, colorscale='RdBu', zmin=-1, zmax=1))
                 fig_corr.update_layout(height=700)
-                st.plotly_chart(fig_corr)
-            
+                st.plotly_chart(fig_corr, use_container_width=True)
+                
             with t4:
+                df_assets = download_cross_assets(df_pnl.index.min(), df_pnl.index.max())
                 if not df_assets.empty:
-                    comb = pd.concat([df_daily_ret, df_asset_ret], axis=1).corr()
-                    sub_corr = comb.loc[df_daily_ret.columns, df_asset_ret.columns]
+                    df_assets = df_assets.reindex(df_user_ret.index, method='ffill').pct_change().fillna(0)
+                    comb = pd.concat([df_daily_ret, df_assets], axis=1).corr()
+                    sub_corr = comb.loc[df_daily_ret.columns, df_assets.columns]
                     fig_cross = go.Figure(data=go.Heatmap(z=sub_corr.values, x=sub_corr.columns, y=sub_corr.index, colorscale='RdBu', zmin=-1, zmax=1))
-                    st.plotly_chart(fig_cross)
+                    st.plotly_chart(fig_cross, use_container_width=True)
+                else: st.write("Data not available.")
             
             with t5:
                 st.subheader("Simulation")
@@ -476,12 +952,17 @@ if menu == "Total Portfolio (Team PNL)":
                 with c_in:
                     weights = {}
                     for col in df_daily_ret.columns:
-                        weights[col] = st.slider(col, 0.0, 1.0, 1.0/len(df_daily_ret.columns), 0.05)
+                        weights[col] = st.slider(col, 0.0, 1.0, 1.0/len(df_daily_ret.columns), 0.05, key=f"sim_{col}")
                 with c_out:
-                    sim_daily = df_daily_ret.mul(pd.Series(weights), axis=1).sum(axis=1)
+                    w_series = pd.Series(weights)
+                    sim_daily = df_daily_ret.mul(w_series, axis=1).sum(axis=1)
                     sim_cum = (1 + sim_daily).cumprod() - 1
+                    
                     fig_sim = go.Figure()
                     fig_sim.add_trace(go.Scatter(x=sim_cum.index, y=sim_cum, name="Simulated", line=dict(color='red')))
+                    act_daily = df_pnl.sum(axis=1).div(df_pos.sum(axis=1)).fillna(0)
+                    act_cum = (1 + act_daily).cumprod() - 1
+                    fig_sim.add_trace(go.Scatter(x=act_cum.index, y=act_cum, name="Actual", line=dict(color='grey', dash='dot')))
                     st.plotly_chart(fig_sim, use_container_width=True)
         else: st.error(err)
 
@@ -492,7 +973,7 @@ elif menu == "Cash Equity Analysis":
     if uploaded_file_ce:
         with st.spinner("Processing Data & Fetching Factors..."):
             res = load_cash_equity_data(uploaded_file_ce)
-            df_perf, df_last, df_contrib, country_daily, logs, err = res
+            df_perf, df_last, df_contrib, country_daily, logs, err, _ = res
         
         if err: st.error(err)
         elif df_perf is not None:
@@ -557,7 +1038,16 @@ elif menu == "Cash Equity Analysis":
                                     if col != 'Alpha' and col != 'Unexplained':
                                         fig_attr.add_trace(go.Scatter(x=contrib_cum.index, y=contrib_cum[col], name=col))
                                 st.plotly_chart(fig_attr, use_container_width=True)
-                    else: st.warning("Insufficient data for regression.")
+                        
+                        st.markdown("#### 📅 Monthly Factor Attribution")
+                        m_contrib = contrib.resample('ME').apply(lambda x: (1+x).prod()-1)
+                        m_contrib.index = m_contrib.index.strftime('%Y-%m')
+                        fig_heat = go.Figure(data=go.Heatmap(
+                            z=m_contrib.T.values, x=m_contrib.index, y=m_contrib.columns,
+                            colorscale='RdBu', zmin=-0.03, zmax=0.03
+                        ))
+                        fig_heat.update_layout(height=500)
+                        st.plotly_chart(fig_heat, use_container_width=True)
                 else: st.warning("Factor data download failed.")
 
             with t2:
@@ -588,3 +1078,183 @@ elif menu == "Cash Equity Analysis":
                 cw.success("Top Winners"); cw.dataframe(pnl_df.head(5).style.format({'Final_PnL':'{:,.0f}'}))
                 cl.error("Top Losers"); cl.dataframe(pnl_df.tail(5).style.format({'Final_PnL':'{:,.0f}'}))
                 with st.expander("Daily Data"): st.dataframe(df_perf)
+
+elif menu == "📑 Weekly Report Generator":
+    st.subheader("📑 Weekly Meeting Report Generator")
+    uploaded_file_ce = st.sidebar.file_uploader("Upload 'Holdings3.xlsx' for Report", type=['xlsx'], key="rep")
+    
+    if uploaded_file_ce:
+        with st.spinner("Generating Report Data..."):
+            res = load_cash_equity_data(uploaded_file_ce)
+            df_perf, df_last, df_contrib, country_daily, df_daily_stock, logs, err = res
+            
+        if err: st.error(err)
+        elif df_perf is not None:
+            max_date = df_perf.index.max()
+            report_date = st.date_input("Report Date", max_date)
+            report_date = pd.to_datetime(report_date)
+            
+            factor_returns = download_factors(df_perf.index.min(), report_date)
+            _, factor_contrib, _ = perform_factor_regression(df_perf['Ret_Total_KRW'], factor_returns)
+            
+            dates = {
+                'WTD': df_perf.index[df_perf.index <= report_date][-1] - pd.to_timedelta(df_perf.index[df_perf.index <= report_date][-1].weekday(), unit='D'),
+                'MTD': report_date.replace(day=1),
+                'QTD': report_date.replace(month=((report_date.month-1)//3)*3+1, day=1),
+                'YTD': report_date.replace(month=1, day=1)
+            }
+            
+            global_px = download_global_indices(min(dates.values()), report_date)
+            df_perf_cut = df_perf[df_perf.index <= report_date]
+            df_stock_cut = df_daily_stock[df_daily_stock['기준일자'] <= report_date]
+            if factor_contrib is not None:
+                factor_contrib_cut = factor_contrib[factor_contrib.index <= report_date]
+            else: factor_contrib_cut = None
+            
+            def calc_period_stats(start_dt, label, global_px):
+                sub_perf = df_perf_cut[df_perf_cut.index >= start_dt]
+                if sub_perf.empty: return None
+                cum_ret = (1 + sub_perf['Ret_Total_KRW']).prod() - 1
+                abs_pnl = sub_perf['Total_PnL_KRW'].sum()
+                sub_stock = df_stock_cut[df_stock_cut['기준일자'] >= start_dt]
+                stock_contrib = sub_stock.groupby(['종목명', 'Ticker_ID'])['Contrib_KRW'].sum().reset_index()
+                top5 = stock_contrib.sort_values('Contrib_KRW', ascending=False).head(5)
+                bot5 = stock_contrib.sort_values('Contrib_KRW', ascending=True).head(5)
+                ctry_contrib = sub_stock.groupby('Country')['Contrib_KRW'].sum().sort_values(ascending=False)
+                sect_contrib = sub_stock.groupby('섹터')['Contrib_KRW'].sum().sort_values(ascending=False)
+                f_cont = pd.Series(dtype=float)
+                if factor_contrib_cut is not None:
+                    sub_f = factor_contrib_cut[factor_contrib_cut.index >= start_dt]
+                    if not sub_f.empty:
+                        f_cont = sub_f.apply(lambda x: (1+x).prod()-1).sort_values(ascending=False)
+                idx_ret = pd.Series(dtype=float)
+                if global_px is not None and not global_px.empty:
+                    sub_px = global_px[(global_px.index >= start_dt) & (global_px.index <= report_date)]
+                    sub_px = sub_px.ffill().bfill()
+                    if not sub_px.empty:
+                        idx_ret = sub_px.iloc[-1] / sub_px.iloc[0] - 1
+                return {'label': label, 'ret': cum_ret, 'pnl': abs_pnl, 'top5': top5, 'bot5': bot5, 
+                        'ctry': ctry_contrib, 'sect': sect_contrib, 'factor': f_cont, 'indices': idx_ret}
+
+            tabs = st.tabs(["Summary Report", "WTD", "MTD", "QTD", "YTD"])
+            stats_res = {}
+            for p in ['WTD', 'MTD', 'QTD', 'YTD']:
+                stats_res[p] = calc_period_stats(dates[p], p, global_px)
+                with tabs[list(dates.keys()).index(p) + 1]:
+                    if stats_res[p]:
+                        st.markdown(f"### {p} Performance ({dates[p].date()} ~ {report_date.date()})")
+                        if not stats_res[p]['indices'].empty:
+                            idx_df = stats_res[p]['indices'].sort_values(ascending=False).reset_index()
+                            idx_df.columns = ['Index', 'Return']
+                            idx_df['Return'] = idx_df['Return'].apply(lambda x: f"{x:.2%}")
+                            st.markdown(create_manual_html_table(idx_df, title="Global Index Returns"), unsafe_allow_html=True)
+                        c1, c2 = st.columns(2)
+                        c1.metric("Return", f"{stats_res[p]['ret']:.2%}")
+                        c2.metric("PnL (KRW)", f"{stats_res[p]['pnl']:,.0f}")
+                        st.markdown("#### Top Contributors")
+                        c3, c4 = st.columns(2)
+                        with c3: st.table(stats_res[p]['top5'][['종목명', 'Contrib_KRW']].style.format({'Contrib_KRW': '{:.2%}'}))
+                        with c4: st.table(stats_res[p]['bot5'][['종목명', 'Contrib_KRW']].style.format({'Contrib_KRW': '{:.2%}'}))
+                        st.markdown("#### Attribution Analysis")
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            st.markdown("**Country**")
+                            st.dataframe(stats_res[p]['ctry'].to_frame().style.format('{:.2%}'))
+                        with col_b:
+                            st.markdown("**Sector**")
+                            st.dataframe(stats_res[p]['sect'].to_frame().style.format('{:.2%}'))
+                        with col_c:
+                            st.markdown("**Factor**")
+                            if not stats_res[p]['factor'].empty:
+                                st.dataframe(stats_res[p]['factor'].to_frame(name='Contrib').style.format('{:.2%}'))
+                            else: st.write("No factor data")
+                    else: st.write("No data.")
+
+            with tabs[0]:
+                st.markdown("### 📝 Weekly Meeting Commentary")
+                txt = f"**[Portfolio Weekly Update - {report_date.date()}]**\n\n"
+                
+                wtd = stats_res.get('WTD')
+                if wtd:
+                    txt += f"**1. WTD Performance:** {wtd['ret']:.2%} ({wtd['pnl']:,.0f} KRW)\n"
+                    if not wtd['top5'].empty: txt += f"   - **Lead:** {wtd['top5'].iloc[0]['종목명']} (+{wtd['top5'].iloc[0]['Contrib_KRW']:.2%})\n"
+                    if not wtd['factor'].empty: txt += f"   - **Factor:** Driven by {wtd['factor'].idxmax()} (+{wtd['factor'].max():.2%})\n"
+                
+                mtd = stats_res.get('MTD')
+                if mtd: 
+                    txt += f"**2. MTD:** {mtd['ret']:.2%}. Best Sector: {mtd['sect'].idxmax()}.\n"
+                    if not mtd['factor'].empty: txt += f"   - Factor: {mtd['factor'].idxmax()} style worked well.\n"
+                
+                ytd = stats_res.get('YTD')
+                if ytd: txt += f"**3. YTD:** {ytd['ret']:.2%}, Total PnL {ytd['pnl']:,.0f} KRW.\n"
+                
+                st.text_area("Copy this:", txt, height=300)
+
+                st.markdown("#### 🤖 AI-Generated Weekly Report")
+                llm_choice = st.radio(
+                    "Select LLM",
+                    ["OpenAI (gpt-4o-mini)", "DeepSeek (deepseek-chat)"],
+                    horizontal=True,
+                    key="llm_choice_radio",
+                )
+                lang_choice = st.radio(
+                    "언어 / Language",
+                    ["English", "한국어"],
+                    horizontal=True,
+                    key="ai_lang_choice_radio",
+                )
+                user_comment = st.text_area(
+                    "Optional: Add your own market/positioning comments",
+                    height=120,
+                    key="ai_comment_input",
+                )
+                if st.button("Generate AI Report", key="ai_report_btn"):
+                    provider = "deepseek" if "DeepSeek" in llm_choice else "openai"
+                    try:
+                        ai_text = generate_ai_weekly_report(
+                            stats_res,
+                            report_date,
+                            user_comment,
+                            provider=provider,
+                            language=lang_choice,
+                        )
+                        st.text_area("AI Report", ai_text, height=400, key="ai_report_text")
+                    except Exception as e:
+                        st.error(f"Failed to generate AI report: {e}")
+
+elif menu == "Swap Report":
+    st.subheader("🔄 Swap Report (Gmail → Drive)")
+    st.write("Sync Excel attachments from Gmail into Google Drive folder **Swap Report** as Google Sheets.")
+
+    uploaded_json = st.file_uploader(
+        "Upload Google API JSON (service account or authorized user)",
+        type=["json"],
+        key="google_api_json_uploader",
+    )
+    if uploaded_json is not None:
+        try:
+            info = json.load(uploaded_json)
+            st.session_state["google_api_json"] = info
+            try:
+                get_google_service.clear()
+            except Exception:
+                pass
+            st.success("Google credentials loaded.")
+        except Exception as e:
+            st.error(f"Invalid JSON: {e}")
+
+    query = st.text_input(
+        "Gmail search query",
+        value=_get_secret_or_env("GMAIL_QUERY", GMAIL_QUERY_DEFAULT),
+        help="Default searches for subject containing 'JMLNKWGE Synthetic Portfolio EOD Report' with .xlsx attachments.",
+        key="swap_report_gmail_query",
+    )
+    max_msgs = st.number_input("Max messages to scan", min_value=1, max_value=200, value=50, step=10, key="swap_report_max_msgs")
+
+    if st.button("Sync to Drive", key="swap_report_sync_btn"):
+        with st.spinner("Syncing Gmail attachments to Drive..."):
+            uploaded_cnt, skipped_cnt, err = sync_swap_reports_to_drive(query=query, max_messages=int(max_msgs))
+        if err:
+            st.error(err)
+        else:
+            st.success(f"Uploaded {uploaded_cnt} file(s), skipped {skipped_cnt} existing.")
