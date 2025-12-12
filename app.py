@@ -18,6 +18,7 @@ try:
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaIoBaseUpload
+    from google_auth_oauthlib.flow import InstalledAppFlow
 except ModuleNotFoundError:
     Credentials = None
     ServiceAccountCredentials = None
@@ -25,6 +26,7 @@ except ModuleNotFoundError:
     build = None
     HttpError = Exception
     MediaIoBaseUpload = None
+    InstalledAppFlow = None
 
 try:
     import openai
@@ -443,6 +445,9 @@ def get_google_credentials(scopes):
         try:
             if uploaded_info.get("type") == "service_account" and ServiceAccountCredentials is not None:
                 return ServiceAccountCredentials.from_service_account_info(uploaded_info, scopes=scopes)
+            # OAuth client secret files ("installed"/"web") are handled in UI
+            if "installed" in uploaded_info or "web" in uploaded_info:
+                return None
             return Credentials.from_authorized_user_info(uploaded_info, scopes=scopes)
         except Exception:
             pass
@@ -1227,7 +1232,7 @@ elif menu == "Swap Report":
     st.write("Sync Excel attachments from Gmail into Google Drive folder **Swap Report** as Google Sheets.")
 
     uploaded_json = st.file_uploader(
-        "Upload Google API JSON (service account or authorized user)",
+        "Upload Google API JSON (service account / authorized user / OAuth client secret)",
         type=["json"],
         key="google_api_json_uploader",
     )
@@ -1239,9 +1244,56 @@ elif menu == "Swap Report":
                 get_google_service.clear()
             except Exception:
                 pass
-            st.success("Google credentials loaded.")
+            if info.get("type") == "service_account":
+                st.success("Service account credentials loaded.")
+            elif "refresh_token" in info:
+                st.success("Authorized user credentials loaded.")
+            elif "installed" in info or "web" in info:
+                st.warning("OAuth client secret loaded. Please authorize access below.")
+            else:
+                st.warning("JSON loaded, but type not recognized. Please upload a service account or authorized user JSON.")
         except Exception as e:
             st.error(f"Invalid JSON: {e}")
+
+    info = st.session_state.get("google_api_json")
+    if info and ("installed" in info or "web" in info):
+        st.markdown("#### Google OAuth Authorization")
+        if InstalledAppFlow is None:
+            st.error("google-auth-oauthlib is not installed. Please add it to requirements.")
+        else:
+            scopes = list(set(GMAIL_SCOPES + DRIVE_SCOPES))
+            try:
+                flow = InstalledAppFlow.from_client_config(info, scopes=scopes)
+                flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+                auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+                st.markdown(f"1) Click to authorize: {auth_url}")
+                code = st.text_input("2) Paste authorization code", key="swap_report_auth_code")
+                if st.button("3) Finish authorization", key="swap_report_finish_auth"):
+                    if not code:
+                        st.warning("Please paste the authorization code first.")
+                    else:
+                        try:
+                            flow.fetch_token(code=code)
+                            creds = flow.credentials
+                            user_info = {
+                                "token": creds.token,
+                                "refresh_token": creds.refresh_token,
+                                "token_uri": creds.token_uri,
+                                "client_id": creds.client_id,
+                                "client_secret": creds.client_secret,
+                                "scopes": creds.scopes,
+                            }
+                            st.session_state["google_api_json"] = user_info
+                            try:
+                                get_google_service.clear()
+                            except Exception:
+                                pass
+                            st.success("Authorization complete. You can now sync to Drive.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Authorization failed: {e}")
+            except Exception as e:
+                st.error(f"Failed to start OAuth flow: {e}")
 
     query = st.text_input(
         "Gmail search query",
