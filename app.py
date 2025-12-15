@@ -376,7 +376,7 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
         "1) Market & Macro Overview (very short, based only on factor/index performance you see in the data)\n"
         "2) Portfolio Performance Summary (WTD, MTD, QTD, YTD vs indices)\n"
         "3) Attribution (by country, sector, factor, and key single names from top/bottom contributors)\n"
-        "4) Risk & Volatility Review (beta/volatility impressions inferred from patterns in returns; call out realized volatility, drawdowns, and Sharpe-style risk-adjusted performance)\n"
+        "4) Risk & Volatility Review (beta/volatility impressions inferred from patterns in returns; call out realized volatility, drawdowns, Sharpe-style risk-adjusted performance, AND isolate/describe hedge PnL impact vs underlying equity)\n"
         "5) PM Action Items / Portfolio Changes (what to add, trim, hedge, or monitor, qualitatively)\n"
         "6) Quant / Signal Perspective (what seems to work: momentum, mean-reversion, factor tilts, etc.).\n"
         "Write in a clear, bullet-point friendly style suitable for a weekly investment meeting note.\n"
@@ -1095,12 +1095,20 @@ elif menu == "📑 Weekly Report Generator":
             
         if err: st.error(err)
         elif df_perf is not None:
+            view_opt = st.radio("Currency View", ["KRW (Hedged)", "Local (Hedged, USD base)"], horizontal=True, key="weekly_view_opt")
+            if "Local" in view_opt:
+                ret_col = "Ret_Total_Local"
+                view_label = "Total Return (Local, hedged)"
+            else:
+                ret_col = "Ret_Total_KRW"
+                view_label = "Total Return (KRW, hedged)"
+
             max_date = df_perf.index.max()
             report_date = st.date_input("Report Date", max_date)
             report_date = pd.to_datetime(report_date)
             
             factor_returns = download_factors(df_perf.index.min(), report_date)
-            _, factor_contrib, _ = perform_factor_regression(df_perf['Ret_Total_KRW'], factor_returns)
+            _, factor_contrib, _ = perform_factor_regression(df_perf[ret_col], factor_returns)
             
             dates = {
                 'WTD': df_perf.index[df_perf.index <= report_date][-1] - pd.to_timedelta(df_perf.index[df_perf.index <= report_date][-1].weekday(), unit='D'),
@@ -1119,8 +1127,8 @@ elif menu == "📑 Weekly Report Generator":
             def calc_period_stats(start_dt, label, global_px):
                 sub_perf = df_perf_cut[df_perf_cut.index >= start_dt]
                 if sub_perf.empty: return None
-                cum_ret = (1 + sub_perf['Ret_Total_KRW']).prod() - 1
-                abs_pnl = sub_perf['Total_PnL_KRW'].sum()
+                cum_ret = (1 + sub_perf[ret_col]).prod() - 1
+                abs_pnl = sub_perf['Total_PnL_KRW'].sum()  # already includes hedge PnL in KRW
                 sub_stock = df_stock_cut[df_stock_cut['기준일자'] >= start_dt]
                 stock_contrib = sub_stock.groupby(['종목명', 'Ticker_ID'])['Contrib_KRW'].sum().reset_index()
                 top5 = stock_contrib.sort_values('Contrib_KRW', ascending=False).head(5)
@@ -1154,7 +1162,7 @@ elif menu == "📑 Weekly Report Generator":
                             idx_df['Return'] = idx_df['Return'].apply(lambda x: f"{x:.2%}")
                             st.markdown(create_manual_html_table(idx_df, title="Global Index Returns"), unsafe_allow_html=True)
                         c1, c2 = st.columns(2)
-                        c1.metric("Return", f"{stats_res[p]['ret']:.2%}")
+                        c1.metric(view_label, f"{stats_res[p]['ret']:.2%}")
                         c2.metric("PnL (KRW)", f"{stats_res[p]['pnl']:,.0f}")
                         st.markdown("#### Top Contributors")
                         c3, c4 = st.columns(2)
