@@ -366,6 +366,31 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
     is_korean = norm_lang.startswith("ko") or "한국" in norm_lang or "korean" in norm_lang or norm_lang == "kr"
     lang_hint = "Write the full report in Korean." if is_korean else "Write the full report in English."
 
+    sections = [
+        "1) Market & Macro Overview (very short, based only on factor/index performance you see in the data)",
+        "2) Portfolio Performance Summary (WTD, MTD, QTD, YTD vs indices)",
+        "3) Attribution (by country, sector, factor, and key single names from top/bottom contributors)",
+        "4) Risk & Volatility Review (beta/volatility impressions inferred from patterns in returns; call out realized volatility, drawdowns, Sharpe-style risk-adjusted performance, AND isolate/describe hedge PnL impact vs underlying equity)",
+        "5) PM Action Items / Portfolio Changes (what to add, trim, hedge, or monitor, qualitatively)",
+        "6) Quant / Signal Perspective (what seems to work: momentum, mean-reversion, factor tilts, etc.).",
+    ]
+    deepseek_extra = ""
+    if provider == "deepseek":
+        sections.append(
+            "7) Drawdown / Sharpe / Return Improvement Plan (build separate plans for YTD, QTD, and MTD performance; "
+            "for each period, diagnose weaknesses and propose concrete actions; include country allocation adjustments "
+            "and country-level volatility management; include an 'Expected Impact' summary with directional results; "
+            "do not invent numbers if metrics are missing)."
+        )
+        deepseek_extra = (
+            "\nFor the improvement plan, create three subsections titled YTD, QTD, and MTD. "
+            "In each subsection, include: (a) key weaknesses, (b) action items, "
+            "(c) country allocation changes, and (d) country-level volatility control ideas. "
+            "Also include a compact impact matrix per subsection with rows for Drawdown, Sharpe Ratio, and Return, "
+            "and columns for Key Drivers, Proposed Actions, and Expected Direction."
+        )
+    section_block = "\n".join(sections)
+
     user_prompt = (
         f"Today is the weekly review for the portfolio, with performance measured up to {report_date.date()}.\n"
         "Here is the structured performance & attribution data for WTD, MTD, QTD, and YTD in JSON format.\n"
@@ -373,12 +398,8 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
         f"Structured data:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
         f"{comment_block}\n\n"
         "Your report MUST be structured in the following sections:\n"
-        "1) Market & Macro Overview (very short, based only on factor/index performance you see in the data)\n"
-        "2) Portfolio Performance Summary (WTD, MTD, QTD, YTD vs indices)\n"
-        "3) Attribution (by country, sector, factor, and key single names from top/bottom contributors)\n"
-        "4) Risk & Volatility Review (beta/volatility impressions inferred from patterns in returns; call out realized volatility, drawdowns, Sharpe-style risk-adjusted performance, AND isolate/describe hedge PnL impact vs underlying equity)\n"
-        "5) PM Action Items / Portfolio Changes (what to add, trim, hedge, or monitor, qualitatively)\n"
-        "6) Quant / Signal Perspective (what seems to work: momentum, mean-reversion, factor tilts, etc.).\n"
+        f"{section_block}\n"
+        f"{deepseek_extra}\n"
         "Write in a clear, bullet-point friendly style suitable for a weekly investment meeting note.\n"
         f"{lang_hint}"
     )
