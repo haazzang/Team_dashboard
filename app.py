@@ -332,6 +332,40 @@ def _calc_risk_metrics(ret_series):
         return {}
 
 
+def _calc_perf_metrics(ret_series):
+    try:
+        if ret_series is None:
+            return {}
+        clean = ret_series.dropna() if isinstance(ret_series, pd.Series) else pd.Series(ret_series).dropna()
+        if clean.size < 2:
+            return {}
+        total_return = (1 + clean).prod() - 1
+        ann_factor = 252 / clean.size
+        cagr = (1 + total_return) ** ann_factor - 1 if ann_factor > 0 else np.nan
+        vol = clean.std() * np.sqrt(252)
+        sharpe = (clean.mean() / clean.std()) * np.sqrt(252) if clean.std() > 0 else np.nan
+        downside = clean[clean < 0]
+        downside_std = downside.std()
+        sortino = (clean.mean() / downside_std) * np.sqrt(252) if downside_std and downside_std > 0 else np.nan
+        cum = (1 + clean).cumprod()
+        peak = cum.cummax()
+        max_dd = (cum / peak - 1).min()
+        calmar = cagr / abs(max_dd) if max_dd and max_dd != 0 else np.nan
+        win_rate = (clean > 0).sum() / (clean != 0).sum() if (clean != 0).sum() > 0 else np.nan
+        return {
+            'Total Return': float(total_return),
+            'CAGR': float(cagr),
+            'Annualized Volatility': float(vol),
+            'Sharpe Ratio': float(sharpe),
+            'Sortino Ratio': float(sortino),
+            'Max Drawdown': float(max_dd),
+            'Calmar Ratio': float(calmar),
+            'Win Rate': float(win_rate),
+        }
+    except Exception:
+        return {}
+
+
 def _clean_metric_map(metric_map):
     if not isinstance(metric_map, dict):
         return {}
@@ -1126,6 +1160,46 @@ elif menu == "Cash Equity Analysis":
                     if col in bm_cum.columns:
                         fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=col+' BM', line=dict(width=1, dash='dash')))
             st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### 📊 Risk Metrics (Hedged Total Returns)")
+            rows = []
+            if view_opt == "KRW":
+                port_label = "Portfolio (Hedged, KRW)"
+            else:
+                port_label = "Portfolio (Hedged, Local/USD)"
+                st.caption("Local currency view uses total hedged returns (includes hedge PnL).")
+            port_metrics = _calc_perf_metrics(target_ret)
+            if port_metrics:
+                rows.append({"Asset": port_label, **port_metrics})
+            if not bm_returns.empty:
+                bm_aligned = bm_returns.reindex(df_perf.index).dropna(how='all')
+                for col in bm_aligned.columns:
+                    metrics = _calc_perf_metrics(bm_aligned[col].dropna())
+                    if metrics:
+                        rows.append({"Asset": f"Benchmark {col}", **metrics})
+            if rows:
+                metrics_df = pd.DataFrame(rows)
+                metric_order = [
+                    "Total Return",
+                    "CAGR",
+                    "Annualized Volatility",
+                    "Sharpe Ratio",
+                    "Sortino Ratio",
+                    "Max Drawdown",
+                    "Calmar Ratio",
+                    "Win Rate",
+                ]
+                metrics_df = metrics_df[["Asset"] + metric_order]
+                disp = metrics_df.copy()
+                percent_cols = ["Total Return", "CAGR", "Annualized Volatility", "Max Drawdown", "Win Rate"]
+                ratio_cols = ["Sharpe Ratio", "Sortino Ratio", "Calmar Ratio"]
+                for col in percent_cols:
+                    disp[col] = disp[col].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "N/A")
+                for col in ratio_cols:
+                    disp[col] = disp[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
+                st.markdown(create_manual_html_table(disp, title="Risk Metrics vs Benchmarks"), unsafe_allow_html=True)
+            else:
+                st.write("Risk metrics not available.")
 
             t1, t2, t3 = st.tabs(["Factor Risk & Attribution", "Selection Effect", "Holdings"])
             
