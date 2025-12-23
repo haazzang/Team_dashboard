@@ -362,6 +362,17 @@ def _clean_risk_metrics(risk):
     return {'portfolio': portfolio, 'benchmarks': benchmarks}
 
 
+def _safe_float_or_none(value):
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def _serialize_stats_for_gpt(stats_res):
     out = {}
     for period, d in stats_res.items():
@@ -375,6 +386,8 @@ def _serialize_stats_for_gpt(stats_res):
             factor = d.get('factor')
             idx = d.get('indices')
             risk = d.get('risk')
+            hedge_contrib = d.get('hedge_contrib')
+            hedge_pnl_krw = d.get('hedge_pnl_krw')
             out[period] = {
                 'label': d.get('label'),
                 'total_return': float(d.get('ret', 0.0)),
@@ -385,6 +398,8 @@ def _serialize_stats_for_gpt(stats_res):
                 'sector_contrib': sect.to_dict() if hasattr(sect, 'to_dict') else {},
                 'factor_contrib': factor.to_dict() if hasattr(factor, 'to_dict') else {},
                 'indices_return': idx.to_dict() if hasattr(idx, 'to_dict') else {},
+                'hedge_contrib': _safe_float_or_none(hedge_contrib),
+                'hedge_pnl_krw': _safe_float_or_none(hedge_pnl_krw),
                 'risk_metrics': _clean_risk_metrics(risk),
             }
         except Exception:
@@ -430,7 +445,7 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
     sections = [
         "1) Market & Macro Overview (very short, based only on factor/index performance you see in the data)",
         "2) Portfolio Performance Summary (WTD, MTD, QTD, YTD vs indices)",
-        "3) Attribution (by country, sector, factor, and key single names from top/bottom contributors)",
+        "3) Attribution (by country, sector, factor, hedge contribution, and key single names from top/bottom contributors)",
         "4) Risk & Volatility Review (beta/volatility impressions inferred from patterns in returns; call out realized volatility, drawdowns, Sharpe-style risk-adjusted performance, AND isolate/describe hedge PnL impact vs underlying equity)",
         "5) PM Action Items / Portfolio Changes (what to add, trim, hedge, or monitor, qualitatively)",
         "6) Quant / Signal Perspective (what seems to work: momentum, mean-reversion, factor tilts, etc.).",
@@ -439,7 +454,8 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
     if provider == "deepseek":
         sections.append(
             "7) YTD Risk Metrics vs Benchmarks (report YTD Sharpe ratio, max drawdown, and annualized volatility for "
-            "the portfolio and each benchmark; compare and interpret; do not invent numbers if metrics are missing)."
+            "the portfolio and each benchmark, based on total hedged returns; compare and interpret; do not invent numbers "
+            "if metrics are missing)."
         )
         sections.append(
             "8) Drawdown / Sharpe / Return Improvement Plan (build separate plans for YTD, QTD, and MTD performance; "
@@ -450,7 +466,8 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
         deepseek_extra = (
             "\nUnder the YTD risk section, include a compact table with rows for Portfolio and each benchmark, "
             "and columns for Sharpe Ratio (YTD), Max Drawdown (YTD), and Annualized Volatility (YTD). "
-            "Use the provided risk_metrics from the YTD block; if a metric is missing, write 'N/A' and do not guess. "
+            "Use the provided risk_metrics from the YTD block (computed on total hedged returns); if a metric is missing, "
+            "write 'N/A' and do not guess. "
             "Then provide a short comparison vs benchmarks.\n"
             "For the improvement plan, create three subsections titled YTD, QTD, and MTD. "
             "In each subsection, include: (a) key weaknesses, (b) action items, "
@@ -1238,6 +1255,17 @@ elif menu == "📑 Weekly Report Generator":
                     sub_px = sub_px.ffill().bfill()
                     if not sub_px.empty:
                         idx_ret = sub_px.iloc[-1] / sub_px.iloc[0] - 1
+                hedge_contrib = None
+                hedge_pnl_krw = None
+                if 'Hedge_PnL_KRW' in sub_perf.columns:
+                    hedge_pnl_krw = sub_perf['Hedge_PnL_KRW'].sum()
+                if ret_col == "Ret_Total_Local":
+                    if 'Ret_Hedge_Local' in sub_perf.columns:
+                        hedge_contrib = sub_perf['Ret_Hedge_Local'].fillna(0).sum()
+                else:
+                    if 'Hedge_PnL_KRW' in sub_perf.columns and 'Total_Prev_MV_KRW' in sub_perf.columns:
+                        denom = sub_perf['Total_Prev_MV_KRW'].replace(0, np.nan)
+                        hedge_contrib = (sub_perf['Hedge_PnL_KRW'] / denom).fillna(0).sum()
                 portfolio_risk = _calc_risk_metrics(sub_perf[ret_col])
                 benchmark_risk = {}
                 if sub_px is not None and not sub_px.empty:
@@ -1248,6 +1276,7 @@ elif menu == "📑 Weekly Report Generator":
                             benchmark_risk[col] = metrics
                 return {'label': label, 'ret': cum_ret, 'pnl': abs_pnl, 'top5': top5, 'bot5': bot5, 
                         'ctry': ctry_contrib, 'sect': sect_contrib, 'factor': f_cont, 'indices': idx_ret,
+                        'hedge_contrib': hedge_contrib, 'hedge_pnl_krw': hedge_pnl_krw,
                         'risk': {'portfolio': portfolio_risk, 'benchmarks': benchmark_risk}}
 
             tabs = st.tabs(["Summary Report", "WTD", "MTD", "QTD", "YTD"])
@@ -1282,6 +1311,10 @@ elif menu == "📑 Weekly Report Generator":
                             if not stats_res[p]['factor'].empty:
                                 st.dataframe(stats_res[p]['factor'].to_frame(name='Contrib').style.format('{:.2%}'))
                             else: st.write("No factor data")
+                        hedge_val = stats_res[p].get('hedge_contrib')
+                        hedge_display = f"{hedge_val:.2%}" if hedge_val is not None else "N/A"
+                        st.markdown("**Hedge Contribution**")
+                        st.metric("Hedge Contribution (Return)", hedge_display)
                     else: st.write("No data.")
 
             with tabs[0]:
