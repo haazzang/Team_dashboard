@@ -303,6 +303,65 @@ def _translate_openai_error(err, provider="openai"):
     return err if isinstance(err, RuntimeError) else RuntimeError(msg)
 
 
+def _calc_risk_metrics(ret_series):
+    try:
+        if ret_series is None:
+            return {}
+        if isinstance(ret_series, pd.Series):
+            clean = ret_series.dropna()
+        else:
+            clean = pd.Series(ret_series).dropna()
+        if clean.size < 2:
+            return {}
+        std = clean.std()
+        if std == 0 or np.isnan(std):
+            sharpe = np.nan
+        else:
+            sharpe = (clean.mean() / std) * np.sqrt(252)
+        cum = (1 + clean).cumprod()
+        peak = cum.cummax()
+        drawdown = cum / peak - 1
+        max_dd = drawdown.min()
+        ann_vol = std * np.sqrt(252)
+        return {
+            'sharpe': float(sharpe),
+            'max_drawdown': float(max_dd),
+            'annual_vol': float(ann_vol),
+        }
+    except Exception:
+        return {}
+
+
+def _clean_metric_map(metric_map):
+    if not isinstance(metric_map, dict):
+        return {}
+    cleaned = {}
+    for k, v in metric_map.items():
+        try:
+            if v is None:
+                cleaned[k] = None
+            elif isinstance(v, (float, np.floating)) and not np.isfinite(v):
+                cleaned[k] = None
+            else:
+                cleaned[k] = float(v)
+        except Exception:
+            cleaned[k] = None
+    return cleaned
+
+
+def _clean_risk_metrics(risk):
+    if not isinstance(risk, dict):
+        return {}
+    portfolio = _clean_metric_map(risk.get('portfolio', {}))
+    benchmarks_raw = risk.get('benchmarks', {})
+    benchmarks = {}
+    if isinstance(benchmarks_raw, dict):
+        for name, metric_map in benchmarks_raw.items():
+            if isinstance(metric_map, dict):
+                benchmarks[name] = _clean_metric_map(metric_map)
+    return {'portfolio': portfolio, 'benchmarks': benchmarks}
+
+
 def _serialize_stats_for_gpt(stats_res):
     out = {}
     for period, d in stats_res.items():
@@ -315,6 +374,7 @@ def _serialize_stats_for_gpt(stats_res):
             sect = d.get('sect')
             factor = d.get('factor')
             idx = d.get('indices')
+            risk = d.get('risk')
             out[period] = {
                 'label': d.get('label'),
                 'total_return': float(d.get('ret', 0.0)),
@@ -325,6 +385,7 @@ def _serialize_stats_for_gpt(stats_res):
                 'sector_contrib': sect.to_dict() if hasattr(sect, 'to_dict') else {},
                 'factor_contrib': factor.to_dict() if hasattr(factor, 'to_dict') else {},
                 'indices_return': idx.to_dict() if hasattr(idx, 'to_dict') else {},
+                'risk_metrics': _clean_risk_metrics(risk),
             }
         except Exception:
             continue
@@ -377,17 +438,26 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
     deepseek_extra = ""
     if provider == "deepseek":
         sections.append(
-            "7) Drawdown / Sharpe / Return Improvement Plan (build separate plans for YTD, QTD, and MTD performance; "
+            "7) YTD Risk Metrics vs Benchmarks (report YTD Sharpe ratio, max drawdown, and annualized volatility for "
+            "the portfolio and each benchmark; compare and interpret; do not invent numbers if metrics are missing)."
+        )
+        sections.append(
+            "8) Drawdown / Sharpe / Return Improvement Plan (build separate plans for YTD, QTD, and MTD performance; "
             "for each period, diagnose weaknesses and propose concrete actions; include country allocation adjustments "
             "and country-level volatility management; include an 'Expected Impact' summary with directional results; "
             "do not invent numbers if metrics are missing)."
         )
         deepseek_extra = (
-            "\nFor the improvement plan, create three subsections titled YTD, QTD, and MTD. "
+            "\nUnder the YTD risk section, include a compact table with rows for Portfolio and each benchmark, "
+            "and columns for Sharpe Ratio (YTD), Max Drawdown (YTD), and Annualized Volatility (YTD). "
+            "Use the provided risk_metrics from the YTD block; if a metric is missing, write 'N/A' and do not guess. "
+            "Then provide a short comparison vs benchmarks.\n"
+            "For the improvement plan, create three subsections titled YTD, QTD, and MTD. "
             "In each subsection, include: (a) key weaknesses, (b) action items, "
             "(c) country allocation changes, and (d) country-level volatility control ideas. "
             "Also include a compact impact matrix per subsection with rows for Drawdown, Sharpe Ratio, and Return, "
-            "and columns for Key Drivers, Proposed Actions, and Expected Direction."
+            "and columns for Key Drivers, Proposed Actions, and Expected Direction. "
+            "Base portfolio operation and improvement suggestions on the YTD risk comparison."
         )
     section_block = "\n".join(sections)
 
@@ -1162,13 +1232,23 @@ elif menu == "📑 Weekly Report Generator":
                     if not sub_f.empty:
                         f_cont = sub_f.apply(lambda x: (1+x).prod()-1).sort_values(ascending=False)
                 idx_ret = pd.Series(dtype=float)
+                sub_px = None
                 if global_px is not None and not global_px.empty:
                     sub_px = global_px[(global_px.index >= start_dt) & (global_px.index <= report_date)]
                     sub_px = sub_px.ffill().bfill()
                     if not sub_px.empty:
                         idx_ret = sub_px.iloc[-1] / sub_px.iloc[0] - 1
+                portfolio_risk = _calc_risk_metrics(sub_perf[ret_col])
+                benchmark_risk = {}
+                if sub_px is not None and not sub_px.empty:
+                    bench_ret = sub_px.pct_change().dropna(how='all')
+                    for col in bench_ret.columns:
+                        metrics = _calc_risk_metrics(bench_ret[col])
+                        if metrics:
+                            benchmark_risk[col] = metrics
                 return {'label': label, 'ret': cum_ret, 'pnl': abs_pnl, 'top5': top5, 'bot5': bot5, 
-                        'ctry': ctry_contrib, 'sect': sect_contrib, 'factor': f_cont, 'indices': idx_ret}
+                        'ctry': ctry_contrib, 'sect': sect_contrib, 'factor': f_cont, 'indices': idx_ret,
+                        'risk': {'portfolio': portfolio_risk, 'benchmarks': benchmark_risk}}
 
             tabs = st.tabs(["Summary Report", "WTD", "MTD", "QTD", "YTD"])
             stats_res = {}
