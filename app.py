@@ -756,6 +756,8 @@ def load_cash_equity_data(file):
                                                 country_daily['Daily_PnL_KRW']/country_daily['Prev_MV_KRW'], 0)
 
         df_perf = daily_agg.join(df_hedge, how='outer').fillna(0)
+        if 'Hedge_PnL_KRW' not in df_perf.columns:
+            df_perf['Hedge_PnL_KRW'] = 0.0
         df_perf = df_perf.join(daily_fx_ret, how='left').fillna(0)
         
         min_d, max_d = df_perf.index.min(), df_perf.index.max()
