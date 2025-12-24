@@ -484,32 +484,30 @@ def generate_ai_weekly_report(stats_res, report_date, user_comment='', provider=
         "5) PM Action Items / Portfolio Changes (what to add, trim, hedge, or monitor, qualitatively)",
         "6) Quant / Signal Perspective (what seems to work: momentum, mean-reversion, factor tilts, etc.).",
     ]
-    deepseek_extra = ""
-    if provider == "deepseek":
-        sections.append(
-            "7) YTD Risk Metrics vs Benchmarks (report YTD Sharpe ratio, max drawdown, and annualized volatility for "
-            "the portfolio and each benchmark, based on total hedged returns; compare and interpret; do not invent numbers "
-            "if metrics are missing)."
-        )
-        sections.append(
-            "8) Drawdown / Sharpe / Return Improvement Plan (build separate plans for YTD, QTD, and MTD performance; "
-            "for each period, diagnose weaknesses and propose concrete actions; include country allocation adjustments "
-            "and country-level volatility management; include an 'Expected Impact' summary with directional results; "
-            "do not invent numbers if metrics are missing)."
-        )
-        deepseek_extra = (
-            "\nUnder the YTD risk section, include a compact table with rows for Portfolio and each benchmark, "
-            "and columns for Sharpe Ratio (YTD), Max Drawdown (YTD), and Annualized Volatility (YTD). "
-            "Use the provided risk_metrics from the YTD block (computed on total hedged returns); if a metric is missing, "
-            "write 'N/A' and do not guess. "
-            "Then provide a short comparison vs benchmarks.\n"
-            "For the improvement plan, create three subsections titled YTD, QTD, and MTD. "
-            "In each subsection, include: (a) key weaknesses, (b) action items, "
-            "(c) country allocation changes, and (d) country-level volatility control ideas. "
-            "Also include a compact impact matrix per subsection with rows for Drawdown, Sharpe Ratio, and Return, "
-            "and columns for Key Drivers, Proposed Actions, and Expected Direction. "
-            "Base portfolio operation and improvement suggestions on the YTD risk comparison."
-        )
+    sections.append(
+        "7) YTD Risk Metrics vs Benchmarks (report YTD Sharpe ratio, max drawdown, and annualized volatility for "
+        "the portfolio and each benchmark, based on total hedged returns; compare and interpret; do not invent numbers "
+        "if metrics are missing)."
+    )
+    sections.append(
+        "8) Drawdown / Sharpe / Return Improvement Plan (build separate plans for YTD, QTD, and MTD performance; "
+        "for each period, diagnose weaknesses and propose concrete actions; include country allocation adjustments "
+        "and country-level volatility management; include an 'Expected Impact' summary with directional results; "
+        "do not invent numbers if metrics are missing)."
+    )
+    deepseek_extra = (
+        "\nUnder the YTD risk section, include a compact table with rows for Portfolio and each benchmark, "
+        "and columns for Sharpe Ratio (YTD), Max Drawdown (YTD), and Annualized Volatility (YTD). "
+        "Use the provided risk_metrics from the YTD block (computed on total hedged returns); if a metric is missing, "
+        "write 'N/A' and do not guess. "
+        "Then provide a short comparison vs benchmarks.\n"
+        "For the improvement plan, create three subsections titled YTD, QTD, and MTD. "
+        "In each subsection, include: (a) key weaknesses, (b) action items, "
+        "(c) country allocation changes, and (d) country-level volatility control ideas. "
+        "Also include a compact impact matrix per subsection with rows for Drawdown, Sharpe Ratio, and Return, "
+        "and columns for Key Drivers, Proposed Actions, and Expected Direction. "
+        "Base portfolio operation and improvement suggestions on the YTD risk comparison."
+    )
     section_block = "\n".join(sections)
 
     user_prompt = (
