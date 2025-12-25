@@ -201,6 +201,19 @@ def calculate_alpha_beta(port_ret, bench_ret):
         return intercept * 252, slope, r_value**2
     except: return np.nan, np.nan, np.nan
 
+def calculate_rolling_beta(port_ret, bench_ret, window=60):
+    try:
+        df = pd.concat([port_ret, bench_ret], axis=1).dropna()
+        if len(df) < window:
+            return pd.Series(dtype=float)
+        df.columns = ['Port', 'Bench']
+        rolling_cov = df['Port'].rolling(window).cov(df['Bench'])
+        rolling_var = df['Bench'].rolling(window).var()
+        beta = rolling_cov / rolling_var
+        return beta.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
 def create_manual_html_table(df, title=None):
     html = ''
     if title: html += f'<h5 style="margin-top:20px; margin-bottom:10px;">{title}</h5>'
@@ -981,7 +994,7 @@ elif menu == "Cash Equity Analysis":
             else:
                 st.write("Risk metrics not available.")
 
-            t1, t2, t3 = st.tabs(["Factor Risk & Attribution", "Selection Effect", "Holdings"])
+            t1, t2, t3, t4 = st.tabs(["Factor Risk & Attribution", "Selection Effect", "Holdings", "Beta Trend"])
             
             with t1:
                 st.markdown("#### 🧪 12-Factor Analysis (Risk & Attribution)")
@@ -1045,6 +1058,32 @@ elif menu == "Cash Equity Analysis":
                 cw.success("Top Winners"); cw.dataframe(pnl_df.head(5).style.format({'Final_PnL':'{:,.0f}'}))
                 cl.error("Top Losers"); cl.dataframe(pnl_df.tail(5).style.format({'Final_PnL':'{:,.0f}'}))
                 with st.expander("Daily Data"): st.dataframe(df_perf)
+
+            with t4:
+                st.markdown("#### 📈 Rolling Beta Trend vs Benchmarks")
+                if bm_returns.empty:
+                    st.warning("Benchmark data download failed.")
+                else:
+                    beta_window = st.slider(
+                        "Rolling window (trading days)",
+                        min_value=20,
+                        max_value=252,
+                        value=60,
+                        step=5,
+                        key="beta_window",
+                    )
+                    beta_fig = go.Figure()
+                    bench_map = {"SPX": "US", "Hang Seng": "HK", "Nikkei 225": "JP"}
+                    for label, col in bench_map.items():
+                        if col in bm_returns.columns:
+                            beta_series = calculate_rolling_beta(target_ret, bm_returns[col], window=beta_window)
+                            if not beta_series.empty:
+                                beta_fig.add_trace(go.Scatter(x=beta_series.index, y=beta_series, name=f"{label} Beta"))
+                    if beta_fig.data:
+                        beta_fig.update_layout(yaxis_title="Beta", xaxis_title="Date")
+                        st.plotly_chart(beta_fig, use_container_width=True)
+                    else:
+                        st.write("Insufficient data to compute rolling beta.")
 
 elif menu == "📑 Weekly Report Generator":
     st.subheader("📑 Weekly Meeting Report Generator")
