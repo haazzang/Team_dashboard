@@ -157,6 +157,8 @@ def download_cross_assets(start_date, end_date):
     except:
         return pd.DataFrame()
 
+FACTOR_TARGET_COUNT = 15
+
 @st.cache_data
 def download_factors(start_date, end_date, return_prices=False):
     """Download diverse factor proxies (ETFs)"""
@@ -302,7 +304,7 @@ def perform_factor_regression(port_ret, factor_ret):
         if len(df) < 3:
             return None, None, None
         factor_cols = list(df.columns[1:])
-        max_factors = max(1, len(df) - 2)
+        max_factors = min(FACTOR_TARGET_COUNT, len(df) - 2)
         if len(factor_cols) > max_factors:
             keep = df[factor_cols].var().sort_values(ascending=False).index[:max_factors]
             df = pd.concat([df.iloc[:, [0]], df[keep]], axis=1)
@@ -1168,7 +1170,7 @@ elif menu == "Cash Equity Analysis":
             t1, t2, t3, t4 = st.tabs(["Factor Risk & Attribution", "Selection Effect", "Holdings", "Beta Trend"])
             
             with t1:
-                st.markdown("#### 🧪 12-Factor Analysis (Risk & Attribution)")
+                st.markdown(f"#### 🧪 {FACTOR_TARGET_COUNT}-Factor Analysis (Risk & Attribution)")
                 if not factor_returns.empty:
                     exposures, contrib, r2 = perform_factor_regression(target_ret, factor_returns)
                     
