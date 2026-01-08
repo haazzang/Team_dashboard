@@ -40,6 +40,39 @@ st.title("Team Portfolio Analysis Dashboard")
 # ==============================================================================
 # [Helper Functions] - Fixed Timezone Issues
 # ==============================================================================
+def _clean_symbol(symbol):
+    if symbol is None:
+        return None
+    if isinstance(symbol, (int, np.integer)):
+        return str(symbol)
+    if isinstance(symbol, float) and symbol.is_integer():
+        return str(int(symbol))
+    s = str(symbol).strip()
+    if s.lower() in ("nan", "none", ""):
+        return None
+    if s.endswith(".0") and s.replace(".", "", 1).isdigit():
+        return s[:-2]
+    return s
+
+def normalize_yf_ticker(symbol, currency=None):
+    sym = _clean_symbol(symbol)
+    if not sym:
+        return None
+    if "." in sym:
+        return sym
+    curr = str(currency).strip().upper() if currency is not None else ""
+    if sym.isdigit():
+        if curr == "HKD":
+            return f"{sym.zfill(4)}.HK"
+        if curr == "JPY":
+            return f"{sym.zfill(4)}.T"
+    return sym
+
+def is_etf_value(value):
+    if value is None:
+        return False
+    return "ETF" in str(value).strip().upper()
+
 @st.cache_data
 def fetch_sectors_cached(tickers):
     sector_map = {}
@@ -125,7 +158,7 @@ def download_cross_assets(start_date, end_date):
         return pd.DataFrame()
 
 @st.cache_data
-def download_factors(start_date, end_date):
+def download_factors(start_date, end_date, return_prices=False):
     """Download diverse factor proxies (ETFs)"""
     factors = {
         'Global Mkt': 'ACWI', 'Value': 'VLUE', 'Growth': 'IWF', 'Momentum': 'MTUM',
@@ -134,6 +167,8 @@ def download_factors(start_date, end_date):
         'High Beta': 'SPHB', 'Meme': 'MEME', 'Spec Tech': 'ARKK'
     }
     try:
+        if pd.isna(start_date) or pd.isna(end_date):
+            return pd.DataFrame()
         data = yf.download(list(factors.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
         if 'Adj Close' in data.columns: df = data['Adj Close']
         elif 'Close' in data.columns: df = data['Close']
@@ -146,7 +181,10 @@ def download_factors(start_date, end_date):
 
         inv_map = {v: k for k, v in factors.items()}
         df.rename(columns=inv_map, inplace=True)
-        return df.ffill().pct_change().fillna(0)
+        df = df.ffill()
+        if return_prices:
+            return df
+        return df.pct_change().fillna(0)
     except:
         return pd.DataFrame()
 
@@ -171,10 +209,104 @@ def download_global_indices(start_date, end_date):
     except:
         return pd.DataFrame()
 
+@st.cache_data
+def download_price_history(tickers, start_date, end_date):
+    tickers = [t for t in tickers if t]
+    if not tickers or pd.isna(start_date) or pd.isna(end_date):
+        return pd.DataFrame()
+    try:
+        data = yf.download(tickers, start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
+        if 'Adj Close' in data.columns: df = data['Adj Close']
+        elif 'Close' in data.columns: df = data['Close']
+        else: df = data
+        if isinstance(df, pd.Series):
+            df = df.to_frame()
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        return df.ffill()
+    except:
+        return pd.DataFrame()
+
+def align_factor_returns(port_index, factor_prices):
+    if factor_prices is None or factor_prices.empty or port_index is None or len(port_index) == 0:
+        return pd.DataFrame()
+    aligned = factor_prices.reindex(port_index, method='ffill').ffill().bfill()
+    return aligned.pct_change().fillna(0)
+
+def calculate_holdings_beta(curr_hold, benchmark_map, end_date=None, lookback_days=252, min_obs=30):
+    if curr_hold is None or curr_hold.empty:
+        return {}
+    if '원화평가금액' not in curr_hold.columns:
+        return {}
+
+    hold = curr_hold.copy()
+    if 'Symbol' in hold.columns and 'Ticker_ID' in hold.columns:
+        base_symbol = hold['Symbol'].where(hold['Symbol'].notna(), hold['Ticker_ID'])
+    elif 'Symbol' in hold.columns:
+        base_symbol = hold['Symbol']
+    else:
+        base_symbol = hold['Ticker_ID']
+    currencies = hold['통화'] if '통화' in hold.columns else [None] * len(hold)
+    hold['YF_Ticker'] = [
+        normalize_yf_ticker(sym, cur) for sym, cur in zip(base_symbol, currencies)
+    ]
+    hold = hold.dropna(subset=['YF_Ticker'])
+    hold['원화평가금액'] = pd.to_numeric(hold['원화평가금액'], errors='coerce').fillna(0)
+    weights = hold.groupby('YF_Ticker')['원화평가금액'].sum()
+    weights = weights[weights != 0]
+    total = weights.sum()
+    if total == 0:
+        return {}
+    weights = weights / total
+
+    end_dt = end_date
+    if end_dt is None or pd.isna(end_dt):
+        end_dt = pd.Timestamp.today().normalize()
+    end_dt = min(end_dt, pd.Timestamp.today().normalize())
+    start_dt = end_dt - pd.Timedelta(days=int(lookback_days * 1.6))
+
+    tickers = sorted(set(list(weights.index) + list(benchmark_map.values())))
+    prices = download_price_history(tickers, start_dt, end_dt)
+    if prices.empty:
+        return {}
+    returns = prices.pct_change()
+
+    betas = {}
+    for label, bench_ticker in benchmark_map.items():
+        if bench_ticker not in returns.columns:
+            continue
+        bench_ret = returns[bench_ticker]
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for ticker, weight in weights.items():
+            if ticker not in returns.columns:
+                continue
+            df = pd.concat([returns[ticker], bench_ret], axis=1).dropna()
+            if len(df) < min_obs:
+                continue
+            cov = df.iloc[:, 0].cov(df.iloc[:, 1])
+            var = df.iloc[:, 1].var()
+            if pd.isna(var) or var == 0:
+                continue
+            beta = cov / var
+            weighted_sum += weight * beta
+            weight_total += weight
+        if weight_total > 0:
+            betas[label] = weighted_sum / weight_total
+    return betas
+
 def perform_factor_regression(port_ret, factor_ret):
     try:
         df = pd.concat([port_ret, factor_ret], axis=1).dropna()
-        if len(df) < 20: return None, None, None
+        if len(df) < 3:
+            return None, None, None
+        factor_cols = list(df.columns[1:])
+        max_factors = max(1, len(df) - 2)
+        if len(factor_cols) > max_factors:
+            keep = df[factor_cols].var().sort_values(ascending=False).index[:max_factors]
+            df = pd.concat([df.iloc[:, [0]], df[keep]], axis=1)
+            factor_cols = list(keep)
         Y, X = df.iloc[:, 0].values, df.iloc[:, 1:].values
         X_w_const = np.column_stack([np.ones(len(X)), X])
         betas, residuals, rank, s = np.linalg.lstsq(X_w_const, Y, rcond=None)
@@ -187,8 +319,8 @@ def perform_factor_regression(port_ret, factor_ret):
         contrib['Unexplained'] = Y - (X_w_const @ betas)
         
         ss_tot = np.sum((Y - np.mean(Y))**2)
-        ss_res = np.sum(residuals) if len(residuals) > 0 else 0
-        r2 = 1 - (ss_res / ss_tot)
+        ss_res = np.sum((Y - (X_w_const @ betas)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else np.nan
         return exposures, contrib, r2
     except: return None, None, None
 
@@ -699,11 +831,27 @@ def load_cash_equity_data(file):
 
         if '섹터' not in eq.columns:
             if 'Symbol' in eq.columns:
-                uniques = eq['Symbol'].dropna().unique()
+                def _resolve_yf_symbol(row):
+                    base = row.get('Symbol')
+                    if base is None or (isinstance(base, str) and base.strip() == '') or pd.isna(base):
+                        if 'Ticker_ID' in row:
+                            base = row.get('Ticker_ID')
+                    return normalize_yf_ticker(base, row.get('통화'))
+                eq['YF_Symbol'] = eq.apply(_resolve_yf_symbol, axis=1)
+                uniques = eq['YF_Symbol'].dropna().unique()
                 sec_map = fetch_sectors_cached(tuple(uniques))
-                eq['섹터'] = eq['Symbol'].map(sec_map).fillna('Unknown')
-            else: eq['섹터'] = 'Unknown'
-        else: eq['섹터'] = eq['섹터'].fillna('Unknown')
+                eq['섹터'] = eq['YF_Symbol'].map(sec_map).fillna('Unknown')
+            else:
+                eq['섹터'] = 'Unknown'
+        else:
+            eq['섹터'] = eq['섹터'].fillna('Unknown')
+
+        etf_mask = pd.Series(False, index=eq.index)
+        if '상품구분' in eq.columns:
+            etf_mask |= eq['상품구분'].apply(is_etf_value)
+        if '종목명' in eq.columns:
+            etf_mask |= eq['종목명'].apply(is_etf_value)
+        eq.loc[etf_mask, '섹터'] = 'ETF'
 
         if '통화' in eq.columns:
             curr_map = {'USD': 'US', 'HKD': 'HK', 'JPY': 'JP', 'KRW': 'KR', 'CNY': 'CN'}
@@ -793,7 +941,8 @@ def load_cash_equity_data(file):
         df_perf['Ret_Total_Local'] = df_perf['Ret_Equity_Local'] + df_perf['Ret_Hedge_Local'].fillna(0)
         
         df_perf.fillna(0, inplace=True)
-        df_perf = df_perf.iloc[1:]
+        if len(df_perf) > 1:
+            df_perf = df_perf.iloc[1:]
         
         for c in ['Ret_Equity_KRW', 'Ret_Total_KRW', 'Ret_Equity_Local', 'Ret_Total_Local']:
             df_perf[c.replace('Ret', 'Cum')] = (1 + df_perf[c]).cumprod() - 1
@@ -919,15 +1068,33 @@ elif menu == "Cash Equity Analysis":
         elif df_perf is not None:
             start_dt, end_dt = df_perf.index.min(), df_perf.index.max()
             bm_returns = download_benchmarks_all(start_dt, end_dt)
-            factor_returns = download_factors(start_dt, end_dt)
+            factor_prices = download_factors(start_dt, end_dt, return_prices=True)
             
             view_opt = st.radio("Currency View", ["KRW", "Local Currency (USD Base)"], horizontal=True)
-            
-            last_day = df_perf.iloc[-1]
-            curr_aum = df_perf.iloc[-1]['Total_MV_KRW'] if 'Total_MV_KRW' in df_perf.columns else 0
+
+            max_perf_date = df_perf.index.max() if not df_perf.empty else pd.NaT
+            max_hold_date = df_last['기준일자'].max() if df_last is not None else pd.NaT
+            max_date = max_perf_date if pd.notna(max_perf_date) else max_hold_date
+            if pd.notna(max_date):
+                curr_hold = df_last[(df_last['기준일자'] == max_date) & (df_last['잔고수량'] > 0)]
+            else:
+                curr_hold = df_last[df_last['잔고수량'] > 0] if df_last is not None else pd.DataFrame()
+
+            if 'Total_MV_KRW' in df_perf.columns and not df_perf.empty:
+                curr_aum = df_perf.iloc[-1]['Total_MV_KRW']
+            else:
+                curr_aum = curr_hold['원화평가금액'].sum() if not curr_hold.empty else 0
             
             c1, c2, c3, c4 = st.columns(4)
-            if view_opt == "KRW":
+            if df_perf.empty:
+                c1.metric("Total Return (Hedged)", "N/A")
+                c2.metric("Equity Return (Unhedged)", "N/A")
+                c3.metric("Hedge Impact", "N/A")
+                y_main = y_sub = None
+                name_main = name_sub = None
+                target_ret = pd.Series(dtype=float)
+            elif view_opt == "KRW":
+                last_day = df_perf.iloc[-1]
                 c1.metric("Total Return (Hedged)", f"{last_day['Cum_Total_KRW']:.2%}")
                 c2.metric("Equity Return (Unhedged)", f"{last_day['Cum_Equity_KRW']:.2%}")
                 c3.metric("Hedge Impact", f"{(last_day['Cum_Total_KRW'] - last_day['Cum_Equity_KRW']):.2%}")
@@ -935,6 +1102,7 @@ elif menu == "Cash Equity Analysis":
                 name_main, name_sub = 'Total (Hedged)', 'Equity (KRW)'
                 target_ret = df_perf['Ret_Total_KRW']
             else:
+                last_day = df_perf.iloc[-1]
                 c1.metric("Total Return (Hedged)", f"{last_day['Cum_Total_Local']:.2%}")
                 c2.metric("Equity Return (Unhedged)", f"{last_day['Cum_Equity_Local']:.2%}")
                 c3.metric("Hedge Impact", f"{(last_day['Cum_Total_Local'] - last_day['Cum_Equity_Local']):.2%}")
@@ -943,16 +1111,19 @@ elif menu == "Cash Equity Analysis":
                 target_ret = df_perf['Ret_Total_Local']
             c4.metric("Current AUM", f"{curr_aum:,.0f} KRW")
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df_perf.index, y=df_perf[y_main], name=name_main, line=dict(color='#2563eb', width=3)))
-            if y_sub: fig.add_trace(go.Scatter(x=df_perf.index, y=df_perf[y_sub], name=name_sub, line=dict(color='#60a5fa', dash='dot')))
-            
-            if not bm_returns.empty:
-                bm_cum = (1 + bm_returns).cumprod() - 1
-                for col in ['US', 'KR', 'HK', 'JP']:
-                    if col in bm_cum.columns:
-                        fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=col+' BM', line=dict(width=1, dash='dash')))
-            st.plotly_chart(fig, use_container_width=True)
+            if not df_perf.empty and y_main:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=df_perf.index, y=df_perf[y_main], name=name_main, line=dict(color='#2563eb', width=3)))
+                if y_sub: fig.add_trace(go.Scatter(x=df_perf.index, y=df_perf[y_sub], name=name_sub, line=dict(color='#60a5fa', dash='dot')))
+                
+                if not bm_returns.empty:
+                    bm_cum = (1 + bm_returns).cumprod() - 1
+                    for col in ['US', 'KR', 'HK', 'JP']:
+                        if col in bm_cum.columns:
+                            fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=col+' BM', line=dict(width=1, dash='dash')))
+                st.plotly_chart(fig, use_container_width=True)
+
+            factor_returns = align_factor_returns(target_ret.index, factor_prices)
 
             st.markdown("#### 📊 Risk Metrics (Hedged Total Returns)")
             rows = []
@@ -1028,6 +1199,8 @@ elif menu == "Cash Equity Analysis":
                         ))
                         fig_heat.update_layout(height=500)
                         st.plotly_chart(fig_heat, use_container_width=True)
+                    else:
+                        st.write("Insufficient data to compute factor regression.")
                 else: st.warning("Factor data download failed.")
 
             with t2:
@@ -1045,9 +1218,6 @@ elif menu == "Cash Equity Analysis":
                     
                     st.markdown("---")
                     st.markdown("#### 🥧 Current Allocation Breakdown")
-                    max_date = df_perf.index.max()
-                    curr_hold = df_last[(df_last['기준일자'] == max_date) & (df_last['잔고수량'] > 0)]
-                    
                     if not curr_hold.empty:
                         st.plotly_chart(px.pie(curr_hold, values='원화평가금액', names='섹터', title="Sector Allocation", hole=0.4), use_container_width=True)
                         st.plotly_chart(px.pie(curr_hold, values='원화평가금액', names='Country', title="Country Allocation", hole=0.4), use_container_width=True)
@@ -1085,6 +1255,18 @@ elif menu == "Cash Equity Analysis":
                     else:
                         st.write("Insufficient data to compute rolling beta.")
 
+                st.markdown("#### 🧮 Holdings-Weighted Beta (Latest)")
+                bench_yf_map = {"S&P 500": "^GSPC", "Hang Seng": "^HSI", "Nikkei 225": "^N225", "KOSPI": "^KS11"}
+                holdings_beta = calculate_holdings_beta(curr_hold, bench_yf_map, end_date=max_date)
+                if holdings_beta:
+                    beta_df = pd.Series(holdings_beta, name="Beta").sort_values().reset_index()
+                    beta_df.columns = ["Benchmark", "Beta"]
+                    fig_beta = px.bar(beta_df, x="Beta", y="Benchmark", orientation="h", title="Holdings-Weighted Beta")
+                    fig_beta.update_layout(showlegend=False)
+                    st.plotly_chart(fig_beta, use_container_width=True)
+                else:
+                    st.write("Insufficient data to compute holdings-weighted beta.")
+
 elif menu == "📑 Weekly Report Generator":
     st.subheader("📑 Weekly Meeting Report Generator")
     uploaded_file_ce = st.sidebar.file_uploader("Upload 'Holdings3.xlsx' for Report", type=['xlsx'], key="rep")
@@ -1108,7 +1290,8 @@ elif menu == "📑 Weekly Report Generator":
             report_date = st.date_input("Report Date", max_date)
             report_date = pd.to_datetime(report_date)
             
-            factor_returns = download_factors(df_perf.index.min(), report_date)
+            factor_prices = download_factors(df_perf.index.min(), report_date, return_prices=True)
+            factor_returns = align_factor_returns(df_perf[ret_col].index, factor_prices)
             _, factor_contrib, _ = perform_factor_regression(df_perf[ret_col], factor_returns)
             
             dates = {
