@@ -68,6 +68,10 @@ def normalize_yf_ticker(symbol, currency=None):
             return f"{sym.zfill(4)}.HK"
         if curr == "JPY":
             return f"{sym.zfill(4)}.T"
+    if curr == "HKD":
+        return f"{sym}.HK"
+    if curr == "JPY":
+        return f"{sym}.T"
     return sym
 
 def is_etf_value(value):
@@ -1086,11 +1090,25 @@ menu = st.sidebar.radio(
 if menu == "📌 Portfolio Snapshot":
     st.subheader("📌 Portfolio Snapshot (2026_멀티.xlsx)")
     script_dir = Path(__file__).resolve().parent
-    candidates = [script_dir / "2026_멀티.xlsx", Path.cwd() / "2026_멀티.xlsx"]
+    candidates = []
+    env_path = os.getenv("PORTFOLIO_XLSX_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    if hasattr(st, "secrets") and "PORTFOLIO_XLSX_PATH" in st.secrets:
+        candidates.append(Path(st.secrets["PORTFOLIO_XLSX_PATH"]))
+    candidates.extend([
+        script_dir / "2026_멀티.xlsx",
+        Path.cwd() / "2026_멀티.xlsx",
+        Path.home() / "Desktop" / "Workspace" / "Team" / "2026_멀티.xlsx",
+    ])
     data_path = next((p for p in candidates if p.exists()), None)
     if data_path is None:
         st.error("2026_멀티.xlsx 파일이 앱 폴더에 없습니다.")
-        st.caption(f"검색 경로: {script_dir} , {Path.cwd()}")
+        st.caption("컨테이너/배포 환경에서는 로컬 파일이 보이지 않을 수 있습니다.")
+        st.caption(
+            "해결: 1) 파일을 앱 폴더에 복사하거나 2) PORTFOLIO_XLSX_PATH 환경변수/시크릿으로 경로를 지정하세요."
+        )
+        st.caption("검색 경로: " + " , ".join(str(p) for p in candidates))
     else:
         with st.spinner("포트폴리오 현황 불러오는 중..."):
             df_snapshot, err = load_portfolio_snapshot(str(data_path), data_path.stat().st_mtime)
@@ -1098,49 +1116,50 @@ if menu == "📌 Portfolio Snapshot":
             st.error(f"데이터 로드 실패: {err}")
         else:
             latest_date = df_snapshot["기준일자"].max()
-            latest = df_snapshot[df_snapshot["기준일자"] == latest_date].copy()
-            if "잔고수량" in latest.columns:
-                latest = latest[latest["잔고수량"] > 0]
+            latest_all = df_snapshot[df_snapshot["기준일자"] == latest_date].copy()
 
-            if "원화평가금액" not in latest.columns and {"외화평가금액", "평가환율"}.issubset(latest.columns):
-                latest["원화평가금액"] = latest["외화평가금액"] * latest["평가환율"]
+            if "원화평가금액" not in latest_all.columns and {"외화평가금액", "평가환율"}.issubset(latest_all.columns):
+                latest_all["원화평가금액"] = latest_all["외화평가금액"] * latest_all["평가환율"]
 
-            id_col = "심볼" if "심볼" in latest.columns else ("종목코드" if "종목코드" in latest.columns else "종목명")
-            latest["Ticker_ID"] = latest[id_col].fillna(latest.get("종목명", latest[id_col]))
-            if "종목명" not in latest.columns:
-                latest["종목명"] = latest["Ticker_ID"]
-            if "통화" not in latest.columns:
-                latest["통화"] = "N/A"
+            id_col = "심볼" if "심볼" in latest_all.columns else ("종목코드" if "종목코드" in latest_all.columns else "종목명")
+            latest_all["Ticker_ID"] = latest_all[id_col].fillna(latest_all.get("종목명", latest_all[id_col]))
+            if "종목명" not in latest_all.columns:
+                latest_all["종목명"] = latest_all["Ticker_ID"]
+            if "통화" not in latest_all.columns:
+                latest_all["통화"] = "N/A"
 
-            if "섹터" not in latest.columns:
-                if id_col in latest.columns:
-                    latest["YF_Symbol"] = latest.apply(
-                        lambda row: normalize_yf_ticker(row.get(id_col), row.get("통화")), axis=1
-                    )
-                    tickers = tuple(sorted(latest["YF_Symbol"].dropna().unique()))
+            if "섹터" not in latest_all.columns:
+                if id_col in latest_all.columns:
+                    def _resolve_symbol(row):
+                        base = row.get(id_col)
+                        if base is None or (isinstance(base, str) and base.strip() == "") or pd.isna(base):
+                            base = row.get("종목코드") if "종목코드" in latest_all.columns else row.get("Ticker_ID")
+                        return normalize_yf_ticker(base, row.get("통화"))
+                    latest_all["YF_Symbol"] = latest_all.apply(_resolve_symbol, axis=1)
+                    tickers = tuple(sorted(latest_all["YF_Symbol"].dropna().unique()))
                     sector_map = fetch_sectors_cached(tickers)
-                    latest["섹터"] = latest["YF_Symbol"].map(sector_map).fillna("Unknown")
+                    latest_all["섹터"] = latest_all["YF_Symbol"].map(sector_map).fillna("Unknown")
                 else:
-                    latest["섹터"] = "Unknown"
+                    latest_all["섹터"] = "Unknown"
             else:
-                latest["섹터"] = latest["섹터"].fillna("Unknown")
+                latest_all["섹터"] = latest_all["섹터"].fillna("Unknown")
 
-            etf_mask = pd.Series(False, index=latest.index)
-            if "상품구분" in latest.columns:
-                etf_mask |= latest["상품구분"].apply(is_etf_value)
-            if "종목명" in latest.columns:
-                etf_mask |= latest["종목명"].apply(is_etf_value)
-            latest.loc[etf_mask, "섹터"] = "ETF"
+            etf_mask = pd.Series(False, index=latest_all.index)
+            if "상품구분" in latest_all.columns:
+                etf_mask |= latest_all["상품구분"].apply(is_etf_value)
+            if "종목명" in latest_all.columns:
+                etf_mask |= latest_all["종목명"].apply(is_etf_value)
+            latest_all.loc[etf_mask, "섹터"] = "ETF"
 
-            if "원화평가금액" not in latest.columns:
+            if "원화평가금액" not in latest_all.columns:
                 st.error("원화평가금액 컬럼이 없어 비중 계산이 불가능합니다.")
-                latest = pd.DataFrame()
+                latest_all = pd.DataFrame()
 
-            if latest.empty:
-                st.warning("최신일 보유 종목 데이터가 없습니다.")
+            if latest_all.empty:
+                st.warning("최신일 데이터가 없습니다.")
                 st.stop()
 
-            holdings = latest.groupby("Ticker_ID", dropna=False).agg(
+            holdings = latest_all.groupby("Ticker_ID", dropna=False).agg(
                 원화평가금액=("원화평가금액", "sum"),
                 종목명=("종목명", "first"),
                 섹터=("섹터", "first"),
@@ -1155,9 +1174,9 @@ if menu == "📌 Portfolio Snapshot":
             currency_weights = holdings.groupby("통화")["원화평가금액"].sum().sort_values(ascending=False)
             currency_weights_pct = currency_weights / total_mv if total_mv else currency_weights * 0
 
-            total_pnl = latest.get("원화총평가손익", pd.Series(0, index=latest.index)).sum() + \
-                        latest.get("원화총매매손익", pd.Series(0, index=latest.index)).sum()
-            fx_pnl = latest.get("환손익", pd.Series(0, index=latest.index)).sum()
+            total_pnl = latest_all.get("원화총평가손익", pd.Series(0, index=latest_all.index)).sum() + \
+                        latest_all.get("원화총매매손익", pd.Series(0, index=latest_all.index)).sum()
+            fx_pnl = latest_all.get("환손익", pd.Series(0, index=latest_all.index)).sum()
             local_pnl = total_pnl - fx_pnl
 
             hhi = (holdings["Weight"] ** 2).sum() if not holdings.empty else 0
