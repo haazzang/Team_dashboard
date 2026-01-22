@@ -4,12 +4,14 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import yfinance as yf
+import requests
 from scipy import stats
 import json
 import os
 from io import BytesIO
 import base64
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:
     from google.oauth2.credentials import Credentials
@@ -87,6 +89,96 @@ def fetch_sectors_cached(tickers):
         except:
             sector_map[t] = 'Unknown'
     return sector_map
+
+def _normalize_sp500_symbol(symbol):
+    sym = _clean_symbol(symbol)
+    if not sym:
+        return None
+    return sym.replace(".", "-")
+
+@st.cache_data(ttl=3600)
+def fetch_sp500_weights():
+    url = "https://www.slickcharts.com/sp500"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        tables = pd.read_html(resp.text)
+        table = None
+        for t in tables:
+            if "Symbol" in t.columns and "Weight" in t.columns:
+                table = t
+                break
+        if table is None:
+            return pd.DataFrame()
+        df = table[["Symbol", "Weight"]].copy()
+        df["Weight"] = pd.to_numeric(
+            df["Weight"].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False),
+            errors="coerce",
+        ) / 100.0
+        df = df.dropna(subset=["Symbol", "Weight"])
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def fetch_sp500_sector_weights():
+    weights = fetch_sp500_weights()
+    if weights.empty:
+        return pd.Series(dtype=float)
+    weights["YF_Symbol"] = weights["Symbol"].apply(_normalize_sp500_symbol)
+    tickers = tuple(sorted(weights["YF_Symbol"].dropna().unique()))
+    sector_map = fetch_sectors_cached(tickers)
+    weights["Sector"] = weights["YF_Symbol"].map(sector_map).fillna("Unknown")
+    return weights.groupby("Sector")["Weight"].sum().sort_values(ascending=False)
+
+@st.cache_data
+def load_portfolio_snapshot(file_path, mtime):
+    try:
+        df_raw = pd.read_excel(file_path, sheet_name=0, header=None, engine="openpyxl")
+        h_idx = -1
+        for i in range(min(20, len(df_raw))):
+            row_vals = [str(x).strip() for x in df_raw.iloc[i].values]
+            if "기준일자" in row_vals and ("종목명" in row_vals or "종목코드" in row_vals or "심볼" in row_vals):
+                h_idx = i
+                break
+        if h_idx == -1:
+            return None, "Header not found"
+        raw_cols = [str(c).strip() for c in df_raw.iloc[h_idx].tolist()]
+        valid_indices = [i for i, c in enumerate(raw_cols) if c not in ["nan", "None", ""]]
+        new_cols = []
+        seen = {}
+        for i in valid_indices:
+            c_str = raw_cols[i]
+            if c_str in seen:
+                seen[c_str] += 1
+                new_cols.append(f"{c_str}_{seen[c_str]}")
+            else:
+                seen[c_str] = 0
+                new_cols.append(c_str)
+
+        df = df_raw.iloc[h_idx + 1 :, valid_indices].copy()
+        df.columns = new_cols
+        if "기준일자" in df.columns:
+            df["기준일자"] = pd.to_datetime(df["기준일자"], errors="coerce")
+            df = df.dropna(subset=["기준일자"])
+
+        cols_num = [
+            "원화평가금액",
+            "원화총평가손익",
+            "원화총매매손익",
+            "환손익",
+            "잔고수량",
+            "외화평가금액",
+            "평가환율",
+        ]
+        for c in cols_num:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+        return df, None
+    except Exception as e:
+        return None, str(e)
 
 @st.cache_data
 def download_benchmarks_all(start_date, end_date):
@@ -988,10 +1080,171 @@ def load_cash_equity_data(file):
 # ==============================================================================
 menu = st.sidebar.radio(
     "Dashboard Menu",
-    ["Total Portfolio (Team PNL)", "Cash Equity Analysis", "📑 Weekly Report Generator"],
+    ["📌 Portfolio Snapshot", "Total Portfolio (Team PNL)", "Cash Equity Analysis", "📑 Weekly Report Generator"],
 )
 
-if menu == "Total Portfolio (Team PNL)":
+if menu == "📌 Portfolio Snapshot":
+    st.subheader("📌 Portfolio Snapshot (2026_멀티.xlsx)")
+    data_path = Path("2026_멀티.xlsx")
+    if not data_path.exists():
+        st.error("2026_멀티.xlsx 파일이 앱 폴더에 없습니다.")
+    else:
+        with st.spinner("포트폴리오 현황 불러오는 중..."):
+            df_snapshot, err = load_portfolio_snapshot(str(data_path), data_path.stat().st_mtime)
+        if err or df_snapshot is None or df_snapshot.empty:
+            st.error(f"데이터 로드 실패: {err}")
+        else:
+            latest_date = df_snapshot["기준일자"].max()
+            latest = df_snapshot[df_snapshot["기준일자"] == latest_date].copy()
+            if "잔고수량" in latest.columns:
+                latest = latest[latest["잔고수량"] > 0]
+
+            if "원화평가금액" not in latest.columns and {"외화평가금액", "평가환율"}.issubset(latest.columns):
+                latest["원화평가금액"] = latest["외화평가금액"] * latest["평가환율"]
+
+            id_col = "심볼" if "심볼" in latest.columns else ("종목코드" if "종목코드" in latest.columns else "종목명")
+            latest["Ticker_ID"] = latest[id_col].fillna(latest.get("종목명", latest[id_col]))
+            if "종목명" not in latest.columns:
+                latest["종목명"] = latest["Ticker_ID"]
+            if "통화" not in latest.columns:
+                latest["통화"] = "N/A"
+
+            if "섹터" not in latest.columns:
+                if id_col in latest.columns:
+                    latest["YF_Symbol"] = latest.apply(
+                        lambda row: normalize_yf_ticker(row.get(id_col), row.get("통화")), axis=1
+                    )
+                    tickers = tuple(sorted(latest["YF_Symbol"].dropna().unique()))
+                    sector_map = fetch_sectors_cached(tickers)
+                    latest["섹터"] = latest["YF_Symbol"].map(sector_map).fillna("Unknown")
+                else:
+                    latest["섹터"] = "Unknown"
+            else:
+                latest["섹터"] = latest["섹터"].fillna("Unknown")
+
+            etf_mask = pd.Series(False, index=latest.index)
+            if "상품구분" in latest.columns:
+                etf_mask |= latest["상품구분"].apply(is_etf_value)
+            if "종목명" in latest.columns:
+                etf_mask |= latest["종목명"].apply(is_etf_value)
+            latest.loc[etf_mask, "섹터"] = "ETF"
+
+            if "원화평가금액" not in latest.columns:
+                st.error("원화평가금액 컬럼이 없어 비중 계산이 불가능합니다.")
+                latest = pd.DataFrame()
+
+            if latest.empty:
+                st.warning("최신일 보유 종목 데이터가 없습니다.")
+                st.stop()
+
+            holdings = latest.groupby("Ticker_ID", dropna=False).agg(
+                원화평가금액=("원화평가금액", "sum"),
+                종목명=("종목명", "first"),
+                섹터=("섹터", "first"),
+                통화=("통화", "first"),
+            ).reset_index()
+            total_mv = holdings["원화평가금액"].sum()
+            holdings["Weight"] = np.where(total_mv > 0, holdings["원화평가금액"] / total_mv, 0)
+
+            sector_weights = holdings.groupby("섹터")["원화평가금액"].sum().sort_values(ascending=False)
+            sector_weights_pct = sector_weights / total_mv if total_mv else sector_weights * 0
+
+            currency_weights = holdings.groupby("통화")["원화평가금액"].sum().sort_values(ascending=False)
+            currency_weights_pct = currency_weights / total_mv if total_mv else currency_weights * 0
+
+            total_pnl = latest.get("원화총평가손익", pd.Series(0, index=latest.index)).sum() + \
+                        latest.get("원화총매매손익", pd.Series(0, index=latest.index)).sum()
+            fx_pnl = latest.get("환손익", pd.Series(0, index=latest.index)).sum()
+            local_pnl = total_pnl - fx_pnl
+
+            hhi = (holdings["Weight"] ** 2).sum() if not holdings.empty else 0
+            eff_n = (1 / hhi) if hhi > 0 else 0
+            top5_weight = holdings["Weight"].nlargest(5).sum() if not holdings.empty else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("기준일자", latest_date.strftime("%Y-%m-%d"))
+            c2.metric("총 AUM (KRW)", f"{total_mv:,.0f}")
+            c3.metric("Total PnL (KRW)", f"{total_pnl:,.0f}")
+            c4.metric("Local PnL (KRW)", f"{local_pnl:,.0f}")
+
+            c5, c6, c7, c8 = st.columns(4)
+            c5.metric("보유 종목 수", f"{len(holdings):,}")
+            c6.metric("Top 5 비중", f"{top5_weight:.2%}")
+            c7.metric("HHI", f"{hhi:.4f}")
+            c8.metric("유효 보유 종목 수", f"{eff_n:.1f}")
+
+            st.markdown("#### 🔎 보유 종목 비중")
+            top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
+            fig_hold = go.Figure(
+                data=go.Bar(
+                    x=top_holdings["Ticker_ID"],
+                    y=top_holdings["Weight"],
+                    text=[f"{w:.2%}" for w in top_holdings["Weight"]],
+                    textposition="auto",
+                )
+            )
+            fig_hold.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
+            st.plotly_chart(fig_hold, use_container_width=True)
+
+            st.markdown("#### 🧭 섹터 비중")
+            fig_sector = go.Figure(
+                data=go.Pie(labels=sector_weights_pct.index, values=sector_weights_pct.values, hole=0.45)
+            )
+            fig_sector.update_traces(textinfo="percent+label")
+            st.plotly_chart(fig_sector, use_container_width=True)
+
+            st.markdown("#### 💱 통화 비중")
+            fig_fx = go.Figure(
+                data=go.Bar(
+                    x=currency_weights_pct.index.astype(str),
+                    y=currency_weights_pct.values,
+                    text=[f"{w:.2%}" for w in currency_weights_pct.values],
+                    textposition="auto",
+                )
+            )
+            fig_fx.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
+            st.plotly_chart(fig_fx, use_container_width=True)
+
+            st.markdown("#### 🆚 S&P 500 섹터 Weight 차이 (Portfolio - SP500)")
+            with st.spinner("S&P 500 섹터 가중치 계산 중..."):
+                sp_sector = fetch_sp500_sector_weights()
+            if sp_sector.empty:
+                st.warning("S&P 500 섹터 데이터를 불러오지 못했습니다.")
+            else:
+                port_sector = sector_weights_pct.copy()
+                if "Unknown" in port_sector.index:
+                    port_sector = port_sector.drop("Unknown")
+                sp_sector = sp_sector.drop("Unknown", errors="ignore")
+                if port_sector.sum() > 0:
+                    port_sector = port_sector / port_sector.sum()
+                if sp_sector.sum() > 0:
+                    sp_sector = sp_sector / sp_sector.sum()
+
+                all_sectors = sorted(set(port_sector.index) | set(sp_sector.index))
+                diff = port_sector.reindex(all_sectors, fill_value=0) - sp_sector.reindex(all_sectors, fill_value=0)
+                colors = np.where(diff.values >= 0, "#16a34a", "#dc2626")
+                fig_diff = go.Figure(
+                    data=go.Bar(x=diff.index, y=diff.values, marker_color=colors)
+                )
+                fig_diff.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight Difference")
+                st.plotly_chart(fig_diff, use_container_width=True)
+
+                comp = pd.DataFrame({
+                    "Portfolio": port_sector.reindex(all_sectors, fill_value=0),
+                    "S&P 500": sp_sector.reindex(all_sectors, fill_value=0),
+                })
+                comp["Diff"] = comp["Portfolio"] - comp["S&P 500"]
+                st.dataframe(comp.style.format("{:.2%}"))
+
+            st.markdown("#### 📋 보유 종목 상세")
+            show_cols = ["Ticker_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
+            show_cols = [c for c in show_cols if c in holdings.columns]
+            st.dataframe(holdings.sort_values("Weight", ascending=False)[show_cols].style.format({
+                "원화평가금액": "{:,.0f}",
+                "Weight": "{:.2%}",
+            }))
+
+elif menu == "Total Portfolio (Team PNL)":
     st.subheader("📊 Total Team Portfolio Dashboard")
     uploaded_file = st.sidebar.file_uploader("Upload 'Team_PNL.xlsx'", type=['xlsx'], key="pnl")
     
