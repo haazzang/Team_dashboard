@@ -79,7 +79,7 @@ def is_etf_value(value):
         return False
     return "ETF" in str(value).strip().upper()
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def fetch_sectors_cached(tickers):
     sector_map = {}
     for t in tickers:
@@ -1128,19 +1128,17 @@ if menu == "📌 Portfolio Snapshot":
             if "통화" not in latest_all.columns:
                 latest_all["통화"] = "N/A"
 
+            def _resolve_symbol(row):
+                base = row.get(id_col)
+                if base is None or (isinstance(base, str) and base.strip() == "") or pd.isna(base):
+                    base = row.get("종목코드") if "종목코드" in latest_all.columns else row.get("Ticker_ID")
+                return normalize_yf_ticker(base, row.get("통화"))
+            latest_all["YF_Symbol"] = latest_all.apply(_resolve_symbol, axis=1)
+
             if "섹터" not in latest_all.columns:
-                if id_col in latest_all.columns:
-                    def _resolve_symbol(row):
-                        base = row.get(id_col)
-                        if base is None or (isinstance(base, str) and base.strip() == "") or pd.isna(base):
-                            base = row.get("종목코드") if "종목코드" in latest_all.columns else row.get("Ticker_ID")
-                        return normalize_yf_ticker(base, row.get("통화"))
-                    latest_all["YF_Symbol"] = latest_all.apply(_resolve_symbol, axis=1)
-                    tickers = tuple(sorted(latest_all["YF_Symbol"].dropna().unique()))
-                    sector_map = fetch_sectors_cached(tickers)
-                    latest_all["섹터"] = latest_all["YF_Symbol"].map(sector_map).fillna("Unknown")
-                else:
-                    latest_all["섹터"] = "Unknown"
+                tickers = tuple(sorted(latest_all["YF_Symbol"].dropna().unique()))
+                sector_map = fetch_sectors_cached(tickers)
+                latest_all["섹터"] = latest_all["YF_Symbol"].map(sector_map).fillna("Unknown")
             else:
                 latest_all["섹터"] = latest_all["섹터"].fillna("Unknown")
 
@@ -1159,14 +1157,21 @@ if menu == "📌 Portfolio Snapshot":
                 st.warning("최신일 데이터가 없습니다.")
                 st.stop()
 
-            holdings = latest_all.groupby("Ticker_ID", dropna=False).agg(
+            latest_for_weights = latest_all[latest_all["원화평가금액"] != 0].copy()
+            if latest_for_weights.empty:
+                latest_for_weights = latest_all.copy()
+
+            latest_for_weights["Group_ID"] = latest_for_weights["YF_Symbol"].fillna(latest_for_weights["Ticker_ID"])
+            holdings = latest_for_weights.groupby("Group_ID", dropna=False).agg(
                 원화평가금액=("원화평가금액", "sum"),
                 종목명=("종목명", "first"),
                 섹터=("섹터", "first"),
                 통화=("통화", "first"),
+                Ticker_ID=("Ticker_ID", "first"),
             ).reset_index()
             total_mv = holdings["원화평가금액"].sum()
             holdings["Weight"] = np.where(total_mv > 0, holdings["원화평가금액"] / total_mv, 0)
+            holdings["Label"] = holdings["종목명"].astype(str) + " (" + holdings["Group_ID"].astype(str) + ")"
 
             sector_weights = holdings.groupby("섹터")["원화평가금액"].sum().sort_values(ascending=False)
             sector_weights_pct = sector_weights / total_mv if total_mv else sector_weights * 0
@@ -1199,7 +1204,7 @@ if menu == "📌 Portfolio Snapshot":
             top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
             fig_hold = go.Figure(
                 data=go.Bar(
-                    x=top_holdings["Ticker_ID"],
+                    x=top_holdings["Label"],
                     y=top_holdings["Weight"],
                     text=[f"{w:.2%}" for w in top_holdings["Weight"]],
                     textposition="auto",
@@ -1259,7 +1264,7 @@ if menu == "📌 Portfolio Snapshot":
                 st.dataframe(comp.style.format("{:.2%}"))
 
             st.markdown("#### 📋 보유 종목 상세")
-            show_cols = ["Ticker_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
+            show_cols = ["Group_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
             show_cols = [c for c in show_cols if c in holdings.columns]
             st.dataframe(holdings.sort_values("Weight", ascending=False)[show_cols].style.format({
                 "원화평가금액": "{:,.0f}",
