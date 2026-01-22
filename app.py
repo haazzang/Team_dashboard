@@ -107,48 +107,77 @@ def fetch_sp500_weights():
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
-        tables = pd.read_html(resp.text)
-        table = None
-        for t in tables:
-            if "Symbol" in t.columns and "Weight" in t.columns:
-                table = t
-                break
-        if table is None:
-            return pd.DataFrame()
-        df = table[["Symbol", "Weight"]].copy()
-        df["Weight"] = pd.to_numeric(
-            df["Weight"].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False),
-            errors="coerce",
-        ) / 100.0
-        df = df.dropna(subset=["Symbol", "Weight"])
-        return df
     except Exception:
         return pd.DataFrame()
 
+    try:
+        from bs4 import BeautifulSoup
+    except ModuleNotFoundError:
+        return pd.DataFrame()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    tables = soup.find_all("table")
+    for table in tables:
+        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        if "Symbol" in headers and "Weight" in headers:
+            symbol_idx = headers.index("Symbol")
+            weight_idx = headers.index("Weight")
+            rows = []
+            for tr in table.find_all("tr")[1:]:
+                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if len(cols) <= max(symbol_idx, weight_idx):
+                    continue
+                symbol = cols[symbol_idx]
+                weight_str = cols[weight_idx].replace("%", "").replace(",", "")
+                try:
+                    weight = float(weight_str) / 100.0
+                except ValueError:
+                    continue
+                rows.append({"Symbol": symbol, "Weight": weight})
+            return pd.DataFrame(rows)
+    return pd.DataFrame()
+
 @st.cache_data(ttl=3600)
-def fetch_sp500_sector_weights():
-    url = "https://www.slickcharts.com/sp500/sector"
+def fetch_sp500_sector_map():
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=20)
         resp.raise_for_status()
-        tables = pd.read_html(resp.text)
-        table = None
-        for t in tables:
-            if "Sector" in t.columns and "Weight" in t.columns:
-                table = t
-                break
-        if table is None:
-            return pd.Series(dtype=float)
-        df = table[["Sector", "Weight"]].copy()
-        df["Weight"] = pd.to_numeric(
-            df["Weight"].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False),
-            errors="coerce",
-        ) / 100.0
-        df = df.dropna(subset=["Sector", "Weight"])
-        return df.set_index("Sector")["Weight"].sort_values(ascending=False)
     except Exception:
+        return pd.DataFrame()
+
+    try:
+        from bs4 import BeautifulSoup
+    except ModuleNotFoundError:
+        return pd.DataFrame()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for table in soup.find_all("table", class_="wikitable"):
+        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        if "Symbol" in headers and "GICS Sector" in headers:
+            sym_idx = headers.index("Symbol")
+            sec_idx = headers.index("GICS Sector")
+            rows = []
+            for tr in table.find_all("tr")[1:]:
+                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if len(cols) <= max(sym_idx, sec_idx):
+                    continue
+                rows.append({"Symbol": cols[sym_idx], "Sector": cols[sec_idx]})
+            return pd.DataFrame(rows)
+    return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def fetch_sp500_sector_weights():
+    weights = fetch_sp500_weights()
+    if weights.empty:
         return pd.Series(dtype=float)
+    sector_map = fetch_sp500_sector_map()
+    if sector_map.empty:
+        return pd.Series(dtype=float)
+    merged = weights.merge(sector_map, on="Symbol", how="left")
+    merged["Sector"] = merged["Sector"].fillna("Unknown")
+    return merged.groupby("Sector")["Weight"].sum().sort_values(ascending=False)
 
 @st.cache_data
 def load_portfolio_snapshot(file_path, mtime):
