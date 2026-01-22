@@ -13,6 +13,7 @@ fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 FILE_PATH="${REPO_ROOT}/${FILE_NAME}"
+WATCH_DIR=$(dirname "$FILE_PATH")
 
 if [[ ! -f "$FILE_PATH" ]]; then
   echo "File not found: $FILE_PATH"
@@ -44,9 +45,29 @@ push_to_master() {
   git -C "$tmp_dir" push "$REMOTE" HEAD:"$MASTER_BRANCH"
 }
 
+get_mtime() {
+  if stat -f %m "$1" >/dev/null 2>&1; then
+    stat -f %m "$1"
+  else
+    stat -c %Y "$1"
+  fi
+}
+
+last_mtime=""
+
 echo "Watching: $FILE_PATH"
-fswatch -o "$FILE_PATH" | while read -r _; do
-  sleep 1
+fswatch -o "$WATCH_DIR" | while read -r _; do
+  sleep 2
+  if [[ ! -f "$FILE_PATH" ]]; then
+    continue
+  fi
+
+  mtime=$(get_mtime "$FILE_PATH")
+  if [[ -n "$last_mtime" && "$mtime" == "$last_mtime" ]]; then
+    continue
+  fi
+  last_mtime="$mtime"
+
   git -C "$REPO_ROOT" add "$FILE_NAME"
   if git -C "$REPO_ROOT" diff --cached --quiet -- "$FILE_NAME"; then
     continue
