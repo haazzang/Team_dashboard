@@ -1085,9 +1085,12 @@ menu = st.sidebar.radio(
 
 if menu == "📌 Portfolio Snapshot":
     st.subheader("📌 Portfolio Snapshot (2026_멀티.xlsx)")
-    data_path = Path("2026_멀티.xlsx")
-    if not data_path.exists():
+    script_dir = Path(__file__).resolve().parent
+    candidates = [script_dir / "2026_멀티.xlsx", Path.cwd() / "2026_멀티.xlsx"]
+    data_path = next((p for p in candidates if p.exists()), None)
+    if data_path is None:
         st.error("2026_멀티.xlsx 파일이 앱 폴더에 없습니다.")
+        st.caption(f"검색 경로: {script_dir} , {Path.cwd()}")
     else:
         with st.spinner("포트폴리오 현황 불러오는 중..."):
             df_snapshot, err = load_portfolio_snapshot(str(data_path), data_path.stat().st_mtime)
