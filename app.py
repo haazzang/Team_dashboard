@@ -127,14 +127,28 @@ def fetch_sp500_weights():
 
 @st.cache_data(ttl=3600)
 def fetch_sp500_sector_weights():
-    weights = fetch_sp500_weights()
-    if weights.empty:
+    url = "https://www.slickcharts.com/sp500/sector"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        tables = pd.read_html(resp.text)
+        table = None
+        for t in tables:
+            if "Sector" in t.columns and "Weight" in t.columns:
+                table = t
+                break
+        if table is None:
+            return pd.Series(dtype=float)
+        df = table[["Sector", "Weight"]].copy()
+        df["Weight"] = pd.to_numeric(
+            df["Weight"].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False),
+            errors="coerce",
+        ) / 100.0
+        df = df.dropna(subset=["Sector", "Weight"])
+        return df.set_index("Sector")["Weight"].sort_values(ascending=False)
+    except Exception:
         return pd.Series(dtype=float)
-    weights["YF_Symbol"] = weights["Symbol"].apply(_normalize_sp500_symbol)
-    tickers = tuple(sorted(weights["YF_Symbol"].dropna().unique()))
-    sector_map = fetch_sectors_cached(tickers)
-    weights["Sector"] = weights["YF_Symbol"].map(sector_map).fillna("Unknown")
-    return weights.groupby("Sector")["Weight"].sum().sort_values(ascending=False)
 
 @st.cache_data
 def load_portfolio_snapshot(file_path, mtime):
@@ -1148,6 +1162,7 @@ if menu == "📌 Portfolio Snapshot":
             if "종목명" in latest_all.columns:
                 etf_mask |= latest_all["종목명"].apply(is_etf_value)
             latest_all.loc[etf_mask, "섹터"] = "ETF"
+            latest_all["Is_ETF"] = etf_mask
 
             if "원화평가금액" not in latest_all.columns:
                 st.error("원화평가금액 컬럼이 없어 비중 계산이 불가능합니다.")
@@ -1168,13 +1183,17 @@ if menu == "📌 Portfolio Snapshot":
                 섹터=("섹터", "first"),
                 통화=("통화", "first"),
                 Ticker_ID=("Ticker_ID", "first"),
+                Is_ETF=("Is_ETF", "first"),
             ).reset_index()
             total_mv = holdings["원화평가금액"].sum()
             holdings["Weight"] = np.where(total_mv > 0, holdings["원화평가금액"] / total_mv, 0)
             holdings["Label"] = holdings["종목명"].astype(str) + " (" + holdings["Group_ID"].astype(str) + ")"
 
-            sector_weights = holdings.groupby("섹터")["원화평가금액"].sum().sort_values(ascending=False)
-            sector_weights_pct = sector_weights / total_mv if total_mv else sector_weights * 0
+            etf_weight = holdings.loc[holdings["섹터"] == "ETF", "Weight"].sum() if not holdings.empty else 0
+            holdings_non_etf = holdings[holdings["섹터"] != "ETF"].copy()
+            total_mv_non_etf = holdings_non_etf["원화평가금액"].sum()
+            sector_weights = holdings_non_etf.groupby("섹터")["원화평가금액"].sum().sort_values(ascending=False)
+            sector_weights_pct = sector_weights / total_mv_non_etf if total_mv_non_etf else sector_weights * 0
 
             currency_weights = holdings.groupby("통화")["원화평가금액"].sum().sort_values(ascending=False)
             currency_weights_pct = currency_weights / total_mv if total_mv else currency_weights * 0
@@ -1199,6 +1218,7 @@ if menu == "📌 Portfolio Snapshot":
             c6.metric("Top 5 비중", f"{top5_weight:.2%}")
             c7.metric("HHI", f"{hhi:.4f}")
             c8.metric("유효 보유 종목 수", f"{eff_n:.1f}")
+            st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
 
             st.markdown("#### 🔎 보유 종목 비중")
             top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
