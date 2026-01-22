@@ -823,7 +823,7 @@ def load_cash_equity_data(file):
         rename_map = {'평가단가': 'Market_Price', '외화평가금액': 'Market_Value', '종목코드': 'Ticker', '심볼': 'Symbol'}
         eq.rename(columns=rename_map, inplace=True)
         
-        cols_num = ['원화평가금액', '원화총평가손익', '원화총매매손익', '잔고수량', 'Market_Price', 'Market_Value', '외화평가손익', '외화총매매손익', '평가환율']
+        cols_num = ['원화평가금액', '원화총평가손익', '원화총매매손익', '환손익', '잔고수량', 'Market_Price', 'Market_Value', '외화평가손익', '외화총매매손익', '평가환율']
         for c in cols_num:
             if c in eq.columns: eq[c] = pd.to_numeric(eq[c], errors='coerce').fillna(0)
 
@@ -866,6 +866,19 @@ def load_cash_equity_data(file):
         grid = pd.DataFrame(index=idx).reset_index()
         
         eq_dedup = eq.drop_duplicates(subset=['기준일자', 'Ticker_ID'])
+        daily_totals = None
+        if {'원화총평가손익', '원화총매매손익'}.issubset(eq_dedup.columns):
+            pnl_cols = ['원화총평가손익', '원화총매매손익']
+            agg_cols = pnl_cols + (['환손익'] if '환손익' in eq_dedup.columns else [])
+            daily_totals = eq_dedup.groupby('기준일자')[agg_cols].sum().sort_index()
+            daily_totals['Total_PnL_KRW_Cum'] = daily_totals['원화총평가손익'] + daily_totals['원화총매매손익']
+            if '환손익' in daily_totals.columns:
+                daily_totals['FX_PnL_KRW_Cum'] = daily_totals['환손익']
+            else:
+                daily_totals['FX_PnL_KRW_Cum'] = 0.0
+            daily_totals['Local_PnL_KRW_Cum'] = daily_totals['Total_PnL_KRW_Cum'] - daily_totals['FX_PnL_KRW_Cum']
+            daily_totals['Daily_PnL_KRW'] = daily_totals['Total_PnL_KRW_Cum'].diff().fillna(0)
+            daily_totals['Daily_Local_PnL_KRW'] = daily_totals['Local_PnL_KRW_Cum'].diff().fillna(0)
         cols_keep = ['원화평가금액', '원화총평가손익', '원화총매매손익', '외화평가손익', '외화총매매손익', '통화', '섹터', 'Country', '종목명', 'Market_Value']
         cols_keep = [c for c in cols_keep if c in eq_dedup.columns]
         
@@ -897,10 +910,18 @@ def load_cash_equity_data(file):
         merged['Prev_MV_KRW'] = merged.groupby('Ticker_ID')['원화평가금액'].shift(1).fillna(0)
         
         daily_agg = merged.groupby('기준일자').agg({
-            'Daily_PnL_KRW': 'sum',
             '원화평가금액': 'sum',
             'Prev_MV_KRW': 'sum'
         }).rename(columns={'원화평가금액': 'Total_MV_KRW', 'Prev_MV_KRW': 'Total_Prev_MV_KRW'})
+        if daily_totals is not None:
+            daily_agg = daily_agg.join(
+                daily_totals[['Daily_PnL_KRW', 'Daily_Local_PnL_KRW', 'Total_PnL_KRW_Cum',
+                              'Local_PnL_KRW_Cum', 'FX_PnL_KRW_Cum']],
+                how='left'
+            )
+        else:
+            daily_pnl = merged.groupby('기준일자')['Daily_PnL_KRW'].sum().rename('Daily_PnL_KRW')
+            daily_agg = daily_agg.join(daily_pnl, how='left')
         
         merged = merged.merge(daily_agg['Total_Prev_MV_KRW'].rename('Day_Total_Prev'), on='기준일자', how='left')
         merged['Contrib_KRW'] = np.where(merged['Day_Total_Prev'] > 0, 
@@ -937,8 +958,12 @@ def load_cash_equity_data(file):
         
         df_perf['Ret_Equity_KRW'] = df_perf['Daily_PnL_KRW'] / denom_krw
         df_perf['Ret_Total_KRW'] = df_perf['Total_PnL_KRW'] / denom_krw
-        
-        df_perf['Ret_Equity_Local'] = (1 + df_perf['Ret_Equity_KRW'].fillna(0)) / (1 + df_perf['Port_FX_Ret'].fillna(0)) - 1
+
+        if 'Daily_Local_PnL_KRW' in df_perf.columns:
+            df_perf['Daily_Local_PnL_USD'] = df_perf['Daily_Local_PnL_KRW'] / df_perf['USD_KRW']
+            df_perf['Ret_Equity_Local'] = df_perf['Daily_Local_PnL_USD'] / denom_usd
+        else:
+            df_perf['Ret_Equity_Local'] = (1 + df_perf['Ret_Equity_KRW'].fillna(0)) / (1 + df_perf['Port_FX_Ret'].fillna(0)) - 1
         df_perf['Ret_Hedge_Local'] = df_perf['Hedge_PnL_USD'] / denom_usd
         df_perf['Ret_Total_Local'] = df_perf['Ret_Equity_Local'] + df_perf['Ret_Hedge_Local'].fillna(0)
         
