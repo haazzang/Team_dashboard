@@ -1814,7 +1814,6 @@ if menu == "📌 Portfolio Snapshot":
                 additional_cash_krw = 0
                 if use_additional_cash:
                     st.markdown("#### 💵 추가 현금 투입 설정")
-                    st.caption("프랍 트레이더로서 사용 가능한 추가 자금을 입력하세요. 비중 상향 시 기존 포지션을 매도하지 않고 추가 매수합니다.")
 
                     cash_input_col1, cash_input_col2 = st.columns(2)
                     with cash_input_col1:
