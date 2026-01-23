@@ -586,6 +586,150 @@ def calculate_factor_exposure(weights, returns, simulation_days=30):
 
     return exposures
 
+def calculate_portfolio_beta_multi_period(weights, lookback_periods=[30, 60, 90]):
+    """
+    여러 기간에 대한 포트폴리오 베타 계산 (국가별 벤치마크)
+
+    Args:
+        weights: dict {ticker: weight}
+        lookback_periods: 베타 계산 기간 리스트 (일)
+
+    Returns:
+        dict with beta values for each benchmark and period
+    """
+    if not weights:
+        return {}
+
+    # 벤치마크 정의
+    benchmarks = {
+        "US (S&P 500)": "^GSPC",
+        "KR (KOSPI)": "^KS11",
+        "HK (HSI)": "^HSI",
+        "JP (Nikkei)": "^N225",
+    }
+
+    tickers = [t for t in weights.keys() if t]
+    if not tickers:
+        return {}
+
+    # 최대 기간 + 여유분 데이터 다운로드
+    max_period = max(lookback_periods)
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=max_period + 20)
+
+    # 포트폴리오 종목 + 벤치마크 가격 다운로드
+    all_tickers = tickers + list(benchmarks.values())
+    prices = download_price_history(all_tickers, start_date, end_date)
+    if prices.empty:
+        return {}
+
+    returns = prices.pct_change().dropna()
+
+    # 포트폴리오 수익률 계산
+    port_returns_full = pd.Series(0.0, index=returns.index)
+    for ticker, weight in weights.items():
+        if ticker in returns.columns:
+            port_returns_full += returns[ticker] * weight
+
+    # 각 기간, 각 벤치마크에 대해 베타 계산
+    results = {}
+    for period in lookback_periods:
+        period_key = f"{period}D"
+        results[period_key] = {}
+
+        port_returns = port_returns_full.tail(period)
+
+        for bench_name, bench_ticker in benchmarks.items():
+            if bench_ticker not in returns.columns:
+                continue
+
+            bench_returns = returns[bench_ticker].tail(period)
+
+            # 공통 인덱스
+            common_idx = port_returns.index.intersection(bench_returns.index)
+            if len(common_idx) < 10:
+                continue
+
+            p_ret = port_returns.loc[common_idx]
+            b_ret = bench_returns.loc[common_idx]
+
+            # 베타 계산
+            cov = np.cov(p_ret, b_ret)[0, 1]
+            var = np.var(b_ret)
+            if var > 0:
+                beta = cov / var
+                results[period_key][bench_name] = beta
+
+    return results
+
+def calculate_portfolio_factor_exposure(weights, lookback_days=60):
+    """
+    포트폴리오 팩터 익스포저 계산
+
+    Args:
+        weights: dict {ticker: weight}
+        lookback_days: 분석 기간
+
+    Returns:
+        dict of factor exposures
+    """
+    if not weights:
+        return {}
+
+    # 팩터 ETF 정의
+    factor_etfs = {
+        "Market": "SPY",
+        "Value": "IWD",
+        "Growth": "IWF",
+        "Momentum": "MTUM",
+        "Quality": "QUAL",
+        "Low Vol": "USMV",
+        "Small Cap": "IWM",
+        "EM": "EEM",
+    }
+
+    tickers = [t for t in weights.keys() if t]
+    if not tickers:
+        return {}
+
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=lookback_days + 20)
+
+    # 포트폴리오 종목 + 팩터 ETF 가격 다운로드
+    all_tickers = tickers + list(factor_etfs.values())
+    prices = download_price_history(all_tickers, start_date, end_date)
+    if prices.empty:
+        return {}
+
+    returns = prices.pct_change().dropna().tail(lookback_days)
+
+    # 포트폴리오 수익률 계산
+    port_returns = pd.Series(0.0, index=returns.index)
+    for ticker, weight in weights.items():
+        if ticker in returns.columns:
+            port_returns += returns[ticker] * weight
+
+    # 각 팩터에 대한 베타 계산
+    exposures = {}
+    for factor_name, factor_ticker in factor_etfs.items():
+        if factor_ticker not in returns.columns:
+            continue
+
+        factor_ret = returns[factor_ticker]
+        common_idx = port_returns.index.intersection(factor_ret.index)
+        if len(common_idx) < 10:
+            continue
+
+        p_ret = port_returns.loc[common_idx]
+        f_ret = factor_ret.loc[common_idx]
+
+        cov = np.cov(p_ret, f_ret)[0, 1]
+        var = np.var(f_ret)
+        if var > 0:
+            exposures[factor_name] = cov / var
+
+    return exposures
+
 @st.cache_data(ttl=3600)
 def get_exchange_rates():
     """환율 정보 가져오기 (USD 기준)"""
@@ -1787,6 +1931,104 @@ if menu == "📌 Portfolio Snapshot":
                     })
                     comp["Diff"] = comp["Portfolio"] - comp["S&P 500"]
                     st.dataframe(comp.style.format("{:.2%}"))
+
+                # 포트폴리오 베타 (30/60/90일, 국가별)
+                st.markdown("#### 📊 포트폴리오 베타 (국가별 벤치마크)")
+                st.caption("각 국가 벤치마크 대비 포트폴리오 베타입니다. 베타 > 1이면 벤치마크보다 변동성이 큽니다.")
+
+                with st.spinner("베타 계산 중..."):
+                    beta_results = calculate_portfolio_beta_multi_period(current_weights, [30, 60, 90])
+
+                if beta_results:
+                    # 베타 데이터 정리
+                    beta_data = []
+                    for period, benchmarks in beta_results.items():
+                        for bench_name, beta_val in benchmarks.items():
+                            beta_data.append({
+                                "기간": period,
+                                "벤치마크": bench_name,
+                                "베타": beta_val
+                            })
+
+                    if beta_data:
+                        df_beta = pd.DataFrame(beta_data)
+
+                        # 베타 차트 (그룹 바 차트)
+                        fig_beta = go.Figure()
+
+                        periods = ["30D", "60D", "90D"]
+                        colors = {"30D": "#3b82f6", "60D": "#8b5cf6", "90D": "#ec4899"}
+
+                        for period in periods:
+                            period_data = df_beta[df_beta["기간"] == period]
+                            if not period_data.empty:
+                                fig_beta.add_trace(go.Bar(
+                                    name=period,
+                                    x=period_data["벤치마크"],
+                                    y=period_data["베타"],
+                                    text=[f"{v:.2f}" for v in period_data["베타"]],
+                                    textposition="auto",
+                                    marker_color=colors.get(period, "#6366f1")
+                                ))
+
+                        fig_beta.add_hline(y=1.0, line_dash="dash", line_color="red",
+                                          annotation_text="Beta = 1", annotation_position="right")
+                        fig_beta.update_layout(
+                            barmode="group",
+                            xaxis_title="",
+                            yaxis_title="Beta",
+                            legend_title="기간",
+                            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+                        )
+                        st.plotly_chart(fig_beta, use_container_width=True)
+
+                        # 베타 테이블
+                        df_beta_pivot = df_beta.pivot(index="벤치마크", columns="기간", values="베타")
+                        df_beta_pivot = df_beta_pivot.reindex(columns=["30D", "60D", "90D"])
+                        st.dataframe(df_beta_pivot.style.format("{:.3f}").background_gradient(cmap="RdYlGn_r", vmin=0.5, vmax=1.5))
+                else:
+                    st.warning("베타를 계산할 수 없습니다.")
+
+                # 팩터 익스포저
+                st.markdown("#### 📈 팩터 익스포저 (Factor Exposure)")
+                st.caption("팩터 ETF 대비 베타로 측정한 익스포저입니다. (60일 기준)")
+
+                with st.spinner("팩터 익스포저 계산 중..."):
+                    factor_exposures = calculate_portfolio_factor_exposure(current_weights, lookback_days=60)
+
+                if factor_exposures:
+                    # 팩터 익스포저 차트
+                    factors = list(factor_exposures.keys())
+                    values = list(factor_exposures.values())
+
+                    colors_factor = ["#16a34a" if v >= 0 else "#dc2626" for v in values]
+
+                    fig_factor = go.Figure(data=go.Bar(
+                        x=factors,
+                        y=values,
+                        text=[f"{v:.2f}" for v in values],
+                        textposition="auto",
+                        marker_color=colors_factor
+                    ))
+                    fig_factor.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                                        annotation_text="Exposure = 1", annotation_position="right")
+                    fig_factor.update_layout(
+                        xaxis_title="",
+                        yaxis_title="Factor Beta",
+                    )
+                    st.plotly_chart(fig_factor, use_container_width=True)
+
+                    # 팩터 익스포저 테이블
+                    df_factor = pd.DataFrame({
+                        "팩터": factors,
+                        "익스포저": values
+                    })
+                    df_factor = df_factor.sort_values("익스포저", ascending=False)
+                    st.dataframe(df_factor.style.format({"익스포저": "{:.3f}"}).background_gradient(
+                        subset=["익스포저"], cmap="RdYlGn", vmin=-0.5, vmax=1.5
+                    ))
+                else:
+                    st.warning("팩터 익스포저를 계산할 수 없습니다.")
 
                 st.markdown("#### 📋 보유 종목 상세")
                 show_cols = ["Group_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
