@@ -550,6 +550,157 @@ def calculate_factor_exposure(weights, returns, simulation_days=30):
 
     return exposures
 
+@st.cache_data(ttl=3600)
+def get_exchange_rates():
+    """환율 정보 가져오기 (USD 기준)"""
+    fx_tickers = {
+        "KRW": "KRW=X",   # USD/KRW
+        "JPY": "JPY=X",   # USD/JPY
+        "HKD": "HKD=X",   # USD/HKD
+    }
+    rates = {"USD": 1.0}  # USD는 기본값 1
+
+    for currency, ticker in fx_tickers.items():
+        try:
+            data = yf.Ticker(ticker).history(period="5d")
+            if not data.empty:
+                rates[currency] = data['Close'].iloc[-1]
+        except:
+            # 기본값 설정
+            if currency == "KRW":
+                rates[currency] = 1400.0
+            elif currency == "JPY":
+                rates[currency] = 150.0
+            elif currency == "HKD":
+                rates[currency] = 7.8
+
+    return rates
+
+def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holdings_df, new_positions):
+    """
+    매매해야 하는 주수 계산
+
+    Args:
+        original_weights: dict {ticker: weight} 원래 비중
+        sim_weights: dict {ticker: weight} 시뮬레이션 비중
+        total_nav_krw: 총 NAV (KRW)
+        holdings_df: 보유 종목 DataFrame
+        new_positions: 신규 종목 리스트
+
+    Returns:
+        list of dict with trade details
+    """
+    trades = []
+
+    # 환율 가져오기
+    fx_rates = get_exchange_rates()
+
+    # 모든 티커 수집
+    all_tickers = list(set(original_weights.keys()) | set(sim_weights.keys()))
+
+    # 각 티커에 대해 최신 종가 가져오기
+    ticker_prices = {}
+    ticker_currencies = {}
+
+    for ticker in all_tickers:
+        try:
+            data = yf.Ticker(ticker).history(period="5d")
+            if not data.empty:
+                ticker_prices[ticker] = data['Close'].iloc[-1]
+
+            # 통화 결정
+            if ticker.endswith(".T"):
+                ticker_currencies[ticker] = "JPY"
+            elif ticker.endswith(".HK"):
+                ticker_currencies[ticker] = "HKD"
+            elif ticker.endswith(".KS") or ticker.endswith(".KQ"):
+                ticker_currencies[ticker] = "KRW"
+            else:
+                ticker_currencies[ticker] = "USD"
+        except:
+            pass
+
+    # holdings_df에서 통화 정보 업데이트
+    if "통화" in holdings_df.columns:
+        for idx, row in holdings_df.iterrows():
+            ticker = row.get("YF_Symbol")
+            if ticker and ticker in ticker_currencies:
+                currency = row.get("통화", "USD")
+                if currency and str(currency).strip().upper() not in ["", "NAN", "N/A"]:
+                    ticker_currencies[ticker] = str(currency).strip().upper()
+
+    # 매매 계산
+    for ticker in all_tickers:
+        orig_w = original_weights.get(ticker, 0)
+        sim_w = sim_weights.get(ticker, 0)
+        weight_diff = sim_w - orig_w
+
+        if abs(weight_diff) < 0.0001:
+            continue
+
+        # 현지 통화 가격
+        local_price = ticker_prices.get(ticker)
+        if local_price is None:
+            continue
+
+        currency = ticker_currencies.get(ticker, "USD")
+
+        # 환율 (1 USD = X 현지통화)
+        fx_rate = fx_rates.get(currency, 1.0)
+
+        # USD/KRW 환율
+        usd_krw = fx_rates.get("KRW", 1400.0)
+
+        # 목표 금액 변화 (KRW)
+        target_value_change_krw = weight_diff * total_nav_krw
+
+        # 현지 통화 금액 변화
+        if currency == "KRW":
+            target_value_change_local = target_value_change_krw
+        else:
+            # KRW -> USD -> 현지통화
+            target_value_change_usd = target_value_change_krw / usd_krw
+            if currency == "USD":
+                target_value_change_local = target_value_change_usd
+            else:
+                target_value_change_local = target_value_change_usd * fx_rate
+
+        # 주수 계산
+        shares = target_value_change_local / local_price if local_price > 0 else 0
+        shares_rounded = int(round(shares))
+
+        # 종목명 찾기
+        name_row = holdings_df[holdings_df["YF_Symbol"] == ticker]
+        if len(name_row) > 0:
+            name = name_row["종목명"].values[0]
+        else:
+            # 신규 종목인 경우
+            name = ticker
+
+        # 매매 방향
+        if shares_rounded > 0:
+            action = "매수"
+        elif shares_rounded < 0:
+            action = "매도"
+        else:
+            continue
+
+        trades.append({
+            "티커": ticker,
+            "종목명": name,
+            "매매": action,
+            "주수": abs(shares_rounded),
+            "현지통화가격": local_price,
+            "통화": currency,
+            "원래비중": orig_w,
+            "목표비중": sim_w,
+            "비중변화": weight_diff,
+            "매매금액(현지)": abs(shares_rounded * local_price),
+            "매매금액(KRW)": abs(target_value_change_krw),
+        })
+
+    return trades
+
 def align_factor_returns(port_index, factor_prices):
     if factor_prices is None or factor_prices.empty or port_index is None or len(port_index) == 0:
         return pd.DataFrame()
@@ -1716,6 +1867,99 @@ if menu == "📌 Portfolio Snapshot":
                                 )
                             else:
                                 st.info("비중 변경 사항이 없습니다.")
+
+                            # 매매 주수 계산
+                            st.markdown("### 🛒 매매 주문 (Trade Orders)")
+                            st.caption("목표 비중 달성을 위해 매매해야 하는 주수입니다. (각 국가별 최종 영업일 종가 기준)")
+
+                            with st.spinner("매매 주수 계산 중..."):
+                                trades = calculate_trade_shares(
+                                    result["original_weights"],
+                                    result["sim_weights"],
+                                    total_mv,
+                                    holdings,
+                                    new_positions
+                                )
+
+                            if trades:
+                                df_trades = pd.DataFrame(trades)
+
+                                # 매수/매도 분리
+                                buy_trades = df_trades[df_trades["매매"] == "매수"].copy()
+                                sell_trades = df_trades[df_trades["매매"] == "매도"].copy()
+
+                                col_buy, col_sell = st.columns(2)
+
+                                with col_buy:
+                                    st.markdown("#### 🟢 매수 주문")
+                                    if not buy_trades.empty:
+                                        buy_display = buy_trades[["티커", "종목명", "주수", "현지통화가격", "통화", "매매금액(KRW)"]].copy()
+                                        buy_display = buy_display.sort_values("매매금액(KRW)", ascending=False)
+                                        st.dataframe(
+                                            buy_display.style.format({
+                                                "주수": "{:,.0f}",
+                                                "현지통화가격": "{:,.2f}",
+                                                "매매금액(KRW)": "{:,.0f}"
+                                            }),
+                                            use_container_width=True
+                                        )
+                                        total_buy_krw = buy_trades["매매금액(KRW)"].sum()
+                                        st.metric("총 매수 금액 (KRW)", f"{total_buy_krw:,.0f}")
+                                    else:
+                                        st.info("매수할 종목이 없습니다.")
+
+                                with col_sell:
+                                    st.markdown("#### 🔴 매도 주문")
+                                    if not sell_trades.empty:
+                                        sell_display = sell_trades[["티커", "종목명", "주수", "현지통화가격", "통화", "매매금액(KRW)"]].copy()
+                                        sell_display = sell_display.sort_values("매매금액(KRW)", ascending=False)
+                                        st.dataframe(
+                                            sell_display.style.format({
+                                                "주수": "{:,.0f}",
+                                                "현지통화가격": "{:,.2f}",
+                                                "매매금액(KRW)": "{:,.0f}"
+                                            }),
+                                            use_container_width=True
+                                        )
+                                        total_sell_krw = sell_trades["매매금액(KRW)"].sum()
+                                        st.metric("총 매도 금액 (KRW)", f"{total_sell_krw:,.0f}")
+                                    else:
+                                        st.info("매도할 종목이 없습니다.")
+
+                                # 전체 매매 상세 테이블
+                                with st.expander("📊 전체 매매 상세 보기"):
+                                    df_trades_display = df_trades[[
+                                        "티커", "종목명", "매매", "주수", "현지통화가격", "통화",
+                                        "원래비중", "목표비중", "비중변화", "매매금액(현지)", "매매금액(KRW)"
+                                    ]].copy()
+                                    df_trades_display = df_trades_display.sort_values("매매금액(KRW)", ascending=False)
+
+                                    st.dataframe(
+                                        df_trades_display.style.format({
+                                            "주수": "{:,.0f}",
+                                            "현지통화가격": "{:,.2f}",
+                                            "원래비중": "{:.2%}",
+                                            "목표비중": "{:.2%}",
+                                            "비중변화": "{:+.2%}",
+                                            "매매금액(현지)": "{:,.2f}",
+                                            "매매금액(KRW)": "{:,.0f}"
+                                        }),
+                                        use_container_width=True
+                                    )
+
+                                    # 순 현금 흐름
+                                    total_buy = buy_trades["매매금액(KRW)"].sum() if not buy_trades.empty else 0
+                                    total_sell = sell_trades["매매금액(KRW)"].sum() if not sell_trades.empty else 0
+                                    net_cash = total_sell - total_buy
+
+                                    st.markdown("---")
+                                    nc1, nc2, nc3 = st.columns(3)
+                                    nc1.metric("총 매수", f"₩{total_buy:,.0f}")
+                                    nc2.metric("총 매도", f"₩{total_sell:,.0f}")
+                                    nc3.metric("순 현금 흐름", f"₩{net_cash:,.0f}",
+                                              delta="현금 유입" if net_cash > 0 else "현금 유출" if net_cash < 0 else "균형")
+                            else:
+                                st.info("매매할 종목이 없습니다.")
 
                             # 섹터 비중 비교
                             st.markdown("### 🧭 섹터 비중 비교")
