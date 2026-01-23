@@ -152,12 +152,18 @@ def fetch_sp500_sector_map():
     except ModuleNotFoundError:
         return pd.DataFrame()
 
+    def _norm(text):
+        return "".join(str(text).split()).lower()
+
     soup = BeautifulSoup(resp.text, "html.parser")
-    for table in soup.find_all("table", class_="wikitable"):
+    for table in soup.find_all("table"):
         headers = [th.get_text(strip=True) for th in table.find_all("th")]
-        if "Symbol" in headers and "GICS Sector" in headers:
-            sym_idx = headers.index("Symbol")
-            sec_idx = headers.index("GICS Sector")
+        if not headers:
+            continue
+        norm_headers = [_norm(h) for h in headers]
+        if "symbol" in norm_headers and "gicssector" in norm_headers:
+            sym_idx = norm_headers.index("symbol")
+            sec_idx = norm_headers.index("gicssector")
             rows = []
             for tr in table.find_all("tr")[1:]:
                 cols = [td.get_text(strip=True) for td in tr.find_all("td")]
