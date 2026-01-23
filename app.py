@@ -375,6 +375,105 @@ def download_price_history(tickers, start_date, end_date):
     except:
         return pd.DataFrame()
 
+@st.cache_data(ttl=3600)
+def fetch_latest_prices(tickers):
+    """전일 종가 기준으로 가격 데이터 가져오기"""
+    prices = {}
+    for t in tickers:
+        if not t:
+            continue
+        try:
+            ticker = yf.Ticker(t)
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                prices[t] = hist['Close'].iloc[-1]
+        except:
+            pass
+    return prices
+
+def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_nav, simulation_days=30):
+    """
+    포트폴리오 시뮬레이션 수행
+
+    Args:
+        holdings_df: 현재 보유 종목 DataFrame (YF_Symbol, Weight, 원화평가금액 포함)
+        weight_adjustments: dict {YF_Symbol: new_weight} - 기존 종목 비중 조절
+        new_positions: list of dict [{"ticker": str, "weight": float}] - 신규 종목 추가
+        base_nav: 기준 NAV (원화)
+        simulation_days: 시뮬레이션 기간 (일)
+
+    Returns:
+        dict with simulation results
+    """
+    # 1. 모든 티커 수집 (기존 + 신규)
+    all_tickers = list(holdings_df["YF_Symbol"].dropna().unique())
+    for pos in new_positions:
+        if pos["ticker"] and pos["ticker"] not in all_tickers:
+            all_tickers.append(pos["ticker"])
+
+    if not all_tickers:
+        return None
+
+    # 2. 과거 가격 데이터 다운로드
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=simulation_days + 10)
+
+    prices = download_price_history(all_tickers, start_date, end_date)
+    if prices.empty:
+        return None
+
+    # 최근 simulation_days 일만 사용
+    prices = prices.tail(simulation_days + 1)
+
+    # 3. 수익률 계산
+    returns = prices.pct_change().fillna(0)
+
+    # 4. 원래 비중으로 포트폴리오 수익률 계산
+    original_weights = holdings_df.set_index("YF_Symbol")["Weight"].to_dict()
+
+    # 5. 시뮬레이션 비중 계산
+    sim_weights = original_weights.copy()
+
+    # 기존 종목 비중 조절 적용
+    for ticker, new_weight in weight_adjustments.items():
+        if ticker in sim_weights:
+            sim_weights[ticker] = new_weight
+
+    # 신규 종목 추가
+    for pos in new_positions:
+        if pos["ticker"] and pos["weight"] > 0:
+            sim_weights[pos["ticker"]] = pos["weight"]
+
+    # 비중 정규화 (합이 1이 되도록)
+    total_weight = sum(sim_weights.values())
+    if total_weight > 0:
+        sim_weights = {k: v / total_weight for k, v in sim_weights.items()}
+
+    # 6. 원래 포트폴리오 NAV 계산
+    original_port_returns = pd.Series(0.0, index=returns.index)
+    for ticker, weight in original_weights.items():
+        if ticker in returns.columns:
+            original_port_returns += returns[ticker] * weight
+
+    original_nav = base_nav * (1 + original_port_returns).cumprod()
+
+    # 7. 시뮬레이션 포트폴리오 NAV 계산
+    sim_port_returns = pd.Series(0.0, index=returns.index)
+    for ticker, weight in sim_weights.items():
+        if ticker in returns.columns:
+            sim_port_returns += returns[ticker] * weight
+
+    sim_nav = base_nav * (1 + sim_port_returns).cumprod()
+
+    return {
+        "original_nav": original_nav,
+        "sim_nav": sim_nav,
+        "original_weights": original_weights,
+        "sim_weights": sim_weights,
+        "returns": returns,
+        "prices": prices,
+    }
+
 def align_factor_returns(port_index, factor_prices):
     if factor_prices is None or factor_prices.empty or port_index is None or len(port_index) == 0:
         return pd.DataFrame()
@@ -1242,89 +1341,267 @@ if menu == "📌 Portfolio Snapshot":
             eff_n = (1 / hhi) if hhi > 0 else 0
             top5_weight = holdings["Weight"].nlargest(5).sum() if not holdings.empty else 0
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("기준일자", latest_date.strftime("%Y-%m-%d"))
-            c2.metric("총 AUM (KRW)", f"{total_mv:,.0f}")
-            c3.metric("Total PnL (KRW)", f"{total_pnl:,.0f}")
-            c4.metric("Local PnL (KRW)", f"{local_pnl:,.0f}")
+            # 시뮬레이션용 holdings 데이터 준비
+            holdings["YF_Symbol"] = holdings["Group_ID"]
 
-            c5, c6, c7, c8 = st.columns(4)
-            c5.metric("보유 종목 수", f"{len(holdings):,}")
-            c6.metric("Top 5 비중", f"{top5_weight:.2%}")
-            c7.metric("HHI", f"{hhi:.4f}")
-            c8.metric("유효 보유 종목 수", f"{eff_n:.1f}")
-            st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
+            # 탭 생성: 현황 / 시뮬레이션
+            tab_snapshot, tab_simulation = st.tabs(["📊 포트폴리오 현황", "🔬 포트폴리오 시뮬레이션"])
 
-            st.markdown("#### 🔎 보유 종목 비중")
-            top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
-            fig_hold = go.Figure(
-                data=go.Bar(
-                    x=top_holdings["Label"],
-                    y=top_holdings["Weight"],
-                    text=[f"{w:.2%}" for w in top_holdings["Weight"]],
-                    textposition="auto",
+            with tab_snapshot:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("기준일자", latest_date.strftime("%Y-%m-%d"))
+                c2.metric("총 AUM (KRW)", f"{total_mv:,.0f}")
+                c3.metric("Total PnL (KRW)", f"{total_pnl:,.0f}")
+                c4.metric("Local PnL (KRW)", f"{local_pnl:,.0f}")
+
+                c5, c6, c7, c8 = st.columns(4)
+                c5.metric("보유 종목 수", f"{len(holdings):,}")
+                c6.metric("Top 5 비중", f"{top5_weight:.2%}")
+                c7.metric("HHI", f"{hhi:.4f}")
+                c8.metric("유효 보유 종목 수", f"{eff_n:.1f}")
+                st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
+
+                st.markdown("#### 🔎 보유 종목 비중")
+                top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
+                fig_hold = go.Figure(
+                    data=go.Bar(
+                        x=top_holdings["Label"],
+                        y=top_holdings["Weight"],
+                        text=[f"{w:.2%}" for w in top_holdings["Weight"]],
+                        textposition="auto",
+                    )
                 )
-            )
-            fig_hold.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
-            st.plotly_chart(fig_hold, use_container_width=True)
+                fig_hold.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
+                st.plotly_chart(fig_hold, use_container_width=True)
 
-            st.markdown("#### 🧭 섹터 비중")
-            fig_sector = go.Figure(
-                data=go.Pie(labels=sector_weights_pct.index, values=sector_weights_pct.values, hole=0.45)
-            )
-            fig_sector.update_traces(textinfo="percent+label")
-            st.plotly_chart(fig_sector, use_container_width=True)
-
-            st.markdown("#### 💱 통화 비중")
-            fig_fx = go.Figure(
-                data=go.Bar(
-                    x=currency_weights_pct.index.astype(str),
-                    y=currency_weights_pct.values,
-                    text=[f"{w:.2%}" for w in currency_weights_pct.values],
-                    textposition="auto",
+                st.markdown("#### 🧭 섹터 비중")
+                fig_sector = go.Figure(
+                    data=go.Pie(labels=sector_weights_pct.index, values=sector_weights_pct.values, hole=0.45)
                 )
-            )
-            fig_fx.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
-            st.plotly_chart(fig_fx, use_container_width=True)
+                fig_sector.update_traces(textinfo="percent+label")
+                st.plotly_chart(fig_sector, use_container_width=True)
 
-            st.markdown("#### 🆚 S&P 500 섹터 Weight 차이 (Portfolio - SP500)")
-            with st.spinner("S&P 500 섹터 가중치 계산 중..."):
-                sp_sector = fetch_sp500_sector_weights()
-            if sp_sector.empty:
-                st.warning("S&P 500 섹터 데이터를 불러오지 못했습니다.")
-            else:
-                port_sector = sector_weights_pct.copy()
-                if "Unknown" in port_sector.index:
-                    port_sector = port_sector.drop("Unknown")
-                sp_sector = sp_sector.drop("Unknown", errors="ignore")
-                if port_sector.sum() > 0:
-                    port_sector = port_sector / port_sector.sum()
-                if sp_sector.sum() > 0:
-                    sp_sector = sp_sector / sp_sector.sum()
-
-                all_sectors = sorted(set(port_sector.index) | set(sp_sector.index))
-                diff = port_sector.reindex(all_sectors, fill_value=0) - sp_sector.reindex(all_sectors, fill_value=0)
-                colors = np.where(diff.values >= 0, "#16a34a", "#dc2626")
-                fig_diff = go.Figure(
-                    data=go.Bar(x=diff.index, y=diff.values, marker_color=colors)
+                st.markdown("#### 💱 통화 비중")
+                fig_fx = go.Figure(
+                    data=go.Bar(
+                        x=currency_weights_pct.index.astype(str),
+                        y=currency_weights_pct.values,
+                        text=[f"{w:.2%}" for w in currency_weights_pct.values],
+                        textposition="auto",
+                    )
                 )
-                fig_diff.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight Difference")
-                st.plotly_chart(fig_diff, use_container_width=True)
+                fig_fx.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
+                st.plotly_chart(fig_fx, use_container_width=True)
 
-                comp = pd.DataFrame({
-                    "Portfolio": port_sector.reindex(all_sectors, fill_value=0),
-                    "S&P 500": sp_sector.reindex(all_sectors, fill_value=0),
-                })
-                comp["Diff"] = comp["Portfolio"] - comp["S&P 500"]
-                st.dataframe(comp.style.format("{:.2%}"))
+                st.markdown("#### 🆚 S&P 500 섹터 Weight 차이 (Portfolio - SP500)")
+                with st.spinner("S&P 500 섹터 가중치 계산 중..."):
+                    sp_sector = fetch_sp500_sector_weights()
+                if sp_sector.empty:
+                    st.warning("S&P 500 섹터 데이터를 불러오지 못했습니다.")
+                else:
+                    port_sector = sector_weights_pct.copy()
+                    if "Unknown" in port_sector.index:
+                        port_sector = port_sector.drop("Unknown")
+                    sp_sector = sp_sector.drop("Unknown", errors="ignore")
+                    if port_sector.sum() > 0:
+                        port_sector = port_sector / port_sector.sum()
+                    if sp_sector.sum() > 0:
+                        sp_sector = sp_sector / sp_sector.sum()
 
-            st.markdown("#### 📋 보유 종목 상세")
-            show_cols = ["Group_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
-            show_cols = [c for c in show_cols if c in holdings.columns]
-            st.dataframe(holdings.sort_values("Weight", ascending=False)[show_cols].style.format({
-                "원화평가금액": "{:,.0f}",
-                "Weight": "{:.2%}",
-            }))
+                    all_sectors = sorted(set(port_sector.index) | set(sp_sector.index))
+                    diff = port_sector.reindex(all_sectors, fill_value=0) - sp_sector.reindex(all_sectors, fill_value=0)
+                    colors = np.where(diff.values >= 0, "#16a34a", "#dc2626")
+                    fig_diff = go.Figure(
+                        data=go.Bar(x=diff.index, y=diff.values, marker_color=colors)
+                    )
+                    fig_diff.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight Difference")
+                    st.plotly_chart(fig_diff, use_container_width=True)
+
+                    comp = pd.DataFrame({
+                        "Portfolio": port_sector.reindex(all_sectors, fill_value=0),
+                        "S&P 500": sp_sector.reindex(all_sectors, fill_value=0),
+                    })
+                    comp["Diff"] = comp["Portfolio"] - comp["S&P 500"]
+                    st.dataframe(comp.style.format("{:.2%}"))
+
+                st.markdown("#### 📋 보유 종목 상세")
+                show_cols = ["Group_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
+                show_cols = [c for c in show_cols if c in holdings.columns]
+                st.dataframe(holdings.sort_values("Weight", ascending=False)[show_cols].style.format({
+                    "원화평가금액": "{:,.0f}",
+                    "Weight": "{:.2%}",
+                }))
+
+            with tab_simulation:
+                st.markdown("### 🔬 포트폴리오 비중 시뮬레이션")
+                st.caption("기존 종목의 비중을 조절하거나 신규 종목을 추가하여 NAV 변화를 시뮬레이션합니다. (전일 종가 기준)")
+
+                # 시뮬레이션 기간 설정
+                sim_days = st.slider("시뮬레이션 기간 (일)", min_value=5, max_value=90, value=30, step=5)
+
+                st.markdown("---")
+
+                # 두 개의 컬럼으로 나누기
+                col_existing, col_new = st.columns(2)
+
+                with col_existing:
+                    st.markdown("#### 📈 기존 종목 비중 조절")
+                    st.caption("비중을 조절할 종목을 선택하고 새로운 비중(%)을 입력하세요.")
+
+                    # 기존 종목 리스트 (상위 20개)
+                    top_20 = holdings.sort_values("Weight", ascending=False).head(20)
+
+                    # 세션 상태 초기화
+                    if "weight_adjustments" not in st.session_state:
+                        st.session_state.weight_adjustments = {}
+
+                    # 종목별 슬라이더
+                    weight_adjustments = {}
+                    for idx, row in top_20.iterrows():
+                        ticker = row["YF_Symbol"]
+                        current_weight = row["Weight"] * 100  # %로 변환
+                        label = f"{row['종목명']} ({ticker})"
+
+                        new_weight = st.number_input(
+                            label,
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=float(current_weight),
+                            step=0.5,
+                            format="%.2f",
+                            key=f"weight_{ticker}",
+                            help=f"현재 비중: {current_weight:.2f}%"
+                        )
+                        if abs(new_weight - current_weight) > 0.01:
+                            weight_adjustments[ticker] = new_weight / 100  # 비율로 변환
+
+                with col_new:
+                    st.markdown("#### ➕ 신규 종목 추가")
+                    st.caption("추가할 종목 티커와 비중(%)을 입력하세요.")
+
+                    # 신규 종목 입력 (최대 5개)
+                    new_positions = []
+                    for i in range(5):
+                        c1, c2 = st.columns([2, 1])
+                        with c1:
+                            new_ticker = st.text_input(
+                                f"티커 {i+1}",
+                                value="",
+                                placeholder="예: AAPL, MSFT, NVDA",
+                                key=f"new_ticker_{i}"
+                            ).upper().strip()
+                        with c2:
+                            new_weight_pct = st.number_input(
+                                f"비중 % {i+1}",
+                                min_value=0.0,
+                                max_value=50.0,
+                                value=0.0,
+                                step=0.5,
+                                format="%.2f",
+                                key=f"new_weight_{i}"
+                            )
+                        if new_ticker and new_weight_pct > 0:
+                            new_positions.append({
+                                "ticker": new_ticker,
+                                "weight": new_weight_pct / 100
+                            })
+
+                st.markdown("---")
+
+                # 시뮬레이션 실행 버튼
+                if st.button("🚀 시뮬레이션 실행", type="primary", use_container_width=True):
+                    if not weight_adjustments and not new_positions:
+                        st.warning("비중을 조절하거나 신규 종목을 추가해주세요.")
+                    else:
+                        with st.spinner("시뮬레이션 실행 중..."):
+                            result = simulate_portfolio_nav(
+                                holdings_df=holdings,
+                                weight_adjustments=weight_adjustments,
+                                new_positions=new_positions,
+                                base_nav=total_mv,
+                                simulation_days=sim_days
+                            )
+
+                        if result is None:
+                            st.error("시뮬레이션 실행 실패. 가격 데이터를 가져올 수 없습니다.")
+                        else:
+                            st.success("시뮬레이션 완료!")
+
+                            # 결과 표시
+                            st.markdown("### 📊 시뮬레이션 결과")
+
+                            # NAV 비교 차트
+                            fig_nav = go.Figure()
+                            fig_nav.add_trace(go.Scatter(
+                                x=result["original_nav"].index,
+                                y=result["original_nav"].values,
+                                mode="lines",
+                                name="원래 포트폴리오",
+                                line=dict(color="#6366f1", width=2)
+                            ))
+                            fig_nav.add_trace(go.Scatter(
+                                x=result["sim_nav"].index,
+                                y=result["sim_nav"].values,
+                                mode="lines",
+                                name="시뮬레이션 포트폴리오",
+                                line=dict(color="#f97316", width=2, dash="dash")
+                            ))
+                            fig_nav.update_layout(
+                                title="포트폴리오 NAV 비교",
+                                xaxis_title="날짜",
+                                yaxis_title="NAV (KRW)",
+                                yaxis_tickformat=",",
+                                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+                                hovermode="x unified"
+                            )
+                            st.plotly_chart(fig_nav, use_container_width=True)
+
+                            # 성과 비교 메트릭
+                            orig_final = result["original_nav"].iloc[-1]
+                            sim_final = result["sim_nav"].iloc[-1]
+                            orig_return = (orig_final / total_mv - 1) * 100
+                            sim_return = (sim_final / total_mv - 1) * 100
+                            nav_diff = sim_final - orig_final
+                            return_diff = sim_return - orig_return
+
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("원래 NAV", f"{orig_final:,.0f}")
+                            m2.metric("시뮬레이션 NAV", f"{sim_final:,.0f}", delta=f"{nav_diff:,.0f}")
+                            m3.metric("원래 수익률", f"{orig_return:.2f}%")
+                            m4.metric("시뮬레이션 수익률", f"{sim_return:.2f}%", delta=f"{return_diff:+.2f}%")
+
+                            # 비중 변경 요약
+                            st.markdown("### 📋 비중 변경 요약")
+
+                            # 변경된 비중 테이블
+                            changes = []
+                            for ticker, new_w in result["sim_weights"].items():
+                                orig_w = result["original_weights"].get(ticker, 0)
+                                if abs(new_w - orig_w) > 0.0001:
+                                    # 종목명 찾기
+                                    name_row = holdings[holdings["YF_Symbol"] == ticker]
+                                    name = name_row["종목명"].values[0] if len(name_row) > 0 else ticker
+                                    changes.append({
+                                        "티커": ticker,
+                                        "종목명": name,
+                                        "원래 비중": orig_w,
+                                        "변경 비중": new_w,
+                                        "변경폭": new_w - orig_w
+                                    })
+
+                            if changes:
+                                df_changes = pd.DataFrame(changes)
+                                df_changes = df_changes.sort_values("변경폭", ascending=False)
+                                st.dataframe(
+                                    df_changes.style.format({
+                                        "원래 비중": "{:.2%}",
+                                        "변경 비중": "{:.2%}",
+                                        "변경폭": "{:+.2%}"
+                                    }).background_gradient(subset=["변경폭"], cmap="RdYlGn", vmin=-0.1, vmax=0.1),
+                                    use_container_width=True
+                                )
+                            else:
+                                st.info("비중 변경 사항이 없습니다.")
 
 elif menu == "Total Portfolio (Team PNL)":
     st.subheader("📊 Total Team Portfolio Dashboard")
