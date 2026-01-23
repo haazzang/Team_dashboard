@@ -391,7 +391,7 @@ def fetch_latest_prices(tickers):
             pass
     return prices
 
-def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_nav, simulation_days=30):
+def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_nav, simulation_days=30, additional_cash=0, original_nav=None):
     """
     포트폴리오 시뮬레이션 수행
 
@@ -399,12 +399,18 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
         holdings_df: 현재 보유 종목 DataFrame (YF_Symbol, Weight, 원화평가금액 포함)
         weight_adjustments: dict {YF_Symbol: new_weight} - 기존 종목 비중 조절
         new_positions: list of dict [{"ticker": str, "weight": float, "market": str}] - 신규 종목 추가
-        base_nav: 기준 NAV (원화)
+        base_nav: 시뮬레이션 기준 NAV (원화) - 추가 현금 포함된 금액
         simulation_days: 시뮬레이션 기간 (일)
+        additional_cash: 추가 투입 현금 (원화)
+        original_nav: 원래 NAV (추가 현금 미포함)
 
     Returns:
         dict with simulation results
     """
+    # original_nav가 없으면 base_nav 사용
+    if original_nav is None:
+        original_nav = base_nav
+
     # 1. 모든 티커 수집 (기존 + 신규)
     all_tickers = list(holdings_df["YF_Symbol"].dropna().unique())
     for pos in new_positions:
@@ -431,39 +437,66 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
     # 4. 원래 비중으로 포트폴리오 수익률 계산
     original_weights = holdings_df.set_index("YF_Symbol")["Weight"].to_dict()
 
-    # 5. 시뮬레이션 비중 계산
-    sim_weights = original_weights.copy()
+    # 5. 시뮬레이션 비중 계산 (추가 현금 반영)
+    if additional_cash > 0:
+        # 추가 현금 투입 시: 기존 포지션 유지 + 추가 매수
+        # 기존 종목의 실제 금액 유지, 새로운 NAV 기준으로 비중 재계산
+        sim_weights = {}
 
-    # 기존 종목 비중 조절 적용
-    for ticker, new_weight in weight_adjustments.items():
-        if ticker in sim_weights:
-            sim_weights[ticker] = new_weight
+        # 기존 종목: 기존 금액 / 새 NAV = 새 비중
+        for ticker, orig_weight in original_weights.items():
+            original_value = orig_weight * original_nav  # 기존 금액
+            sim_weights[ticker] = original_value / base_nav  # 새 NAV 기준 비중
 
-    # 신규 종목 추가
-    for pos in new_positions:
-        if pos["ticker"] and pos["weight"] > 0:
-            sim_weights[pos["ticker"]] = pos["weight"]
+        # 비중 조절이 있는 경우 (증가분만 추가 현금으로 매수)
+        for ticker, new_weight in weight_adjustments.items():
+            if ticker in sim_weights:
+                old_weight_in_new_nav = sim_weights[ticker]
+                # 목표 비중이 현재 비중보다 높으면 추가 매수
+                if new_weight > old_weight_in_new_nav:
+                    sim_weights[ticker] = new_weight
+                else:
+                    # 비중 축소는 매도
+                    sim_weights[ticker] = new_weight
+
+        # 신규 종목 추가 (추가 현금으로 매수)
+        for pos in new_positions:
+            if pos["ticker"] and pos["weight"] > 0:
+                sim_weights[pos["ticker"]] = pos["weight"]
+    else:
+        # 추가 현금 없음: 기존 로직
+        sim_weights = original_weights.copy()
+
+        # 기존 종목 비중 조절 적용
+        for ticker, new_weight in weight_adjustments.items():
+            if ticker in sim_weights:
+                sim_weights[ticker] = new_weight
+
+        # 신규 종목 추가
+        for pos in new_positions:
+            if pos["ticker"] and pos["weight"] > 0:
+                sim_weights[pos["ticker"]] = pos["weight"]
 
     # 비중 정규화 (합이 1이 되도록)
     total_weight = sum(sim_weights.values())
     if total_weight > 0:
         sim_weights = {k: v / total_weight for k, v in sim_weights.items()}
 
-    # 6. 원래 포트폴리오 NAV 계산
+    # 6. 원래 포트폴리오 NAV 계산 (원래 NAV 기준)
     original_port_returns = pd.Series(0.0, index=returns.index)
     for ticker, weight in original_weights.items():
         if ticker in returns.columns:
             original_port_returns += returns[ticker] * weight
 
-    original_nav = base_nav * (1 + original_port_returns).cumprod()
+    orig_nav_series = original_nav * (1 + original_port_returns).cumprod()
 
-    # 7. 시뮬레이션 포트폴리오 NAV 계산
+    # 7. 시뮬레이션 포트폴리오 NAV 계산 (새 NAV 기준)
     sim_port_returns = pd.Series(0.0, index=returns.index)
     for ticker, weight in sim_weights.items():
         if ticker in returns.columns:
             sim_port_returns += returns[ticker] * weight
 
-    sim_nav = base_nav * (1 + sim_port_returns).cumprod()
+    sim_nav_series = base_nav * (1 + sim_port_returns).cumprod()
 
     # 8. 섹터 정보 수집
     original_sectors = holdings_df.set_index("YF_Symbol")["섹터"].to_dict() if "섹터" in holdings_df.columns else {}
@@ -475,13 +508,16 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
         original_sectors.update(new_sector_map)
 
     return {
-        "original_nav": original_nav,
-        "sim_nav": sim_nav,
+        "original_nav": orig_nav_series,
+        "sim_nav": sim_nav_series,
         "original_weights": original_weights,
         "sim_weights": sim_weights,
         "returns": returns,
         "prices": prices,
         "sector_map": original_sectors,
+        "additional_cash": additional_cash,
+        "base_nav": base_nav,
+        "original_nav_value": original_nav,
     }
 
 def calculate_factor_exposure(weights, returns, simulation_days=30):
@@ -576,21 +612,27 @@ def get_exchange_rates():
 
     return rates
 
-def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holdings_df, new_positions):
+def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holdings_df, new_positions, original_nav=None, additional_cash=0):
     """
     매매해야 하는 주수 계산
 
     Args:
         original_weights: dict {ticker: weight} 원래 비중
         sim_weights: dict {ticker: weight} 시뮬레이션 비중
-        total_nav_krw: 총 NAV (KRW)
+        total_nav_krw: 총 NAV (KRW) - 시뮬레이션 기준 (추가 현금 포함)
         holdings_df: 보유 종목 DataFrame
         new_positions: 신규 종목 리스트
+        original_nav: 원래 NAV (추가 현금 미포함)
+        additional_cash: 추가 투입 현금 (KRW)
 
     Returns:
         list of dict with trade details
     """
     trades = []
+
+    # original_nav가 없으면 total_nav_krw 사용
+    if original_nav is None:
+        original_nav = total_nav_krw
 
     # 환율 가져오기
     fx_rates = get_exchange_rates()
@@ -635,9 +677,6 @@ def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holding
         sim_w = sim_weights.get(ticker, 0)
         weight_diff = sim_w - orig_w
 
-        if abs(weight_diff) < 0.0001:
-            continue
-
         # 현지 통화 가격
         local_price = ticker_prices.get(ticker)
         if local_price is None:
@@ -651,8 +690,18 @@ def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holding
         # USD/KRW 환율
         usd_krw = fx_rates.get("KRW", 1400.0)
 
-        # 목표 금액 변화 (KRW)
-        target_value_change_krw = weight_diff * total_nav_krw
+        # 목표 금액 변화 계산 (추가 현금 고려)
+        if additional_cash > 0:
+            # 추가 현금 모드: 원래 금액과 목표 금액의 차이 계산
+            original_value_krw = orig_w * original_nav  # 기존 보유 금액
+            target_value_krw = sim_w * total_nav_krw    # 목표 금액 (새 NAV 기준)
+            target_value_change_krw = target_value_krw - original_value_krw
+        else:
+            # 일반 모드: 비중 차이로 계산
+            target_value_change_krw = (sim_w - orig_w) * total_nav_krw
+
+        if abs(target_value_change_krw) < 1000:  # 1000원 미만 변화는 무시
+            continue
 
         # 현지 통화 금액 변화
         if currency == "KRW":
@@ -1751,8 +1800,38 @@ if menu == "📌 Portfolio Snapshot":
                 st.markdown("### 🔬 포트폴리오 비중 시뮬레이션")
                 st.caption("기존 종목의 비중을 조절하거나 신규 종목을 추가하여 NAV 변화를 시뮬레이션합니다. (전일 종가 기준)")
 
-                # 시뮬레이션 기간 설정
-                sim_days = st.slider("시뮬레이션 기간 (일)", min_value=5, max_value=90, value=30, step=5)
+                # 시뮬레이션 설정
+                col_sim_settings1, col_sim_settings2 = st.columns(2)
+
+                with col_sim_settings1:
+                    sim_days = st.slider("시뮬레이션 기간 (일)", min_value=5, max_value=90, value=30, step=5)
+
+                with col_sim_settings2:
+                    # 추가 현금 투입 옵션
+                    use_additional_cash = st.checkbox("💰 추가 현금 투입", value=False,
+                                                      help="비중 상향 시 기존 NAV를 유지하면서 추가 자금을 투입합니다.")
+
+                additional_cash_krw = 0
+                if use_additional_cash:
+                    st.markdown("#### 💵 추가 현금 투입 설정")
+                    st.caption("프랍 트레이더로서 사용 가능한 추가 자금을 입력하세요. 비중 상향 시 기존 포지션을 매도하지 않고 추가 매수합니다.")
+
+                    cash_input_col1, cash_input_col2 = st.columns(2)
+                    with cash_input_col1:
+                        additional_cash_krw = st.number_input(
+                            "추가 투입 금액 (KRW)",
+                            min_value=0,
+                            max_value=100_000_000_000,  # 1000억
+                            value=0,
+                            step=100_000_000,  # 1억 단위
+                            format="%d",
+                            help="추가로 투입할 현금 (원화)"
+                        )
+                    with cash_input_col2:
+                        if additional_cash_krw > 0:
+                            new_total_nav = total_mv + additional_cash_krw
+                            st.metric("새로운 총 NAV", f"₩{new_total_nav:,.0f}")
+                            st.caption(f"기존 NAV: ₩{total_mv:,.0f} + 추가: ₩{additional_cash_krw:,.0f}")
 
                 st.markdown("---")
 
@@ -1863,22 +1942,31 @@ if menu == "📌 Portfolio Snapshot":
 
                 # 시뮬레이션 실행 버튼
                 if st.button("🚀 시뮬레이션 실행", type="primary", use_container_width=True):
-                    if not weight_adjustments and not new_positions:
-                        st.warning("비중을 조절하거나 신규 종목을 추가해주세요.")
+                    if not weight_adjustments and not new_positions and additional_cash_krw == 0:
+                        st.warning("비중을 조절하거나 신규 종목을 추가하거나 추가 현금을 투입해주세요.")
                     else:
+                        # 시뮬레이션 NAV 결정 (추가 현금 포함 여부)
+                        sim_base_nav = total_mv + additional_cash_krw if use_additional_cash else total_mv
+
                         with st.spinner("시뮬레이션 실행 중..."):
                             result = simulate_portfolio_nav(
                                 holdings_df=holdings,
                                 weight_adjustments=weight_adjustments,
                                 new_positions=new_positions,
-                                base_nav=total_mv,
-                                simulation_days=sim_days
+                                base_nav=sim_base_nav,
+                                simulation_days=sim_days,
+                                additional_cash=additional_cash_krw if use_additional_cash else 0,
+                                original_nav=total_mv
                             )
 
                         if result is None:
                             st.error("시뮬레이션 실행 실패. 가격 데이터를 가져올 수 없습니다.")
                         else:
                             st.success("시뮬레이션 완료!")
+
+                            # 추가 현금 투입 시 안내 메시지
+                            if use_additional_cash and additional_cash_krw > 0:
+                                st.info(f"💰 **추가 현금 투입 모드**: 기존 NAV ₩{total_mv:,.0f} + 추가 현금 ₩{additional_cash_krw:,.0f} = 새 NAV ₩{sim_base_nav:,.0f}")
 
                             # 결과 표시
                             st.markdown("### 📊 시뮬레이션 결과")
@@ -1896,7 +1984,7 @@ if menu == "📌 Portfolio Snapshot":
                                 x=result["sim_nav"].index,
                                 y=result["sim_nav"].values,
                                 mode="lines",
-                                name="시뮬레이션 포트폴리오",
+                                name=f"시뮬레이션 포트폴리오{' (추가 현금)' if additional_cash_krw > 0 else ''}",
                                 line=dict(color="#f97316", width=2, dash="dash")
                             ))
                             fig_nav.update_layout(
@@ -1913,7 +2001,7 @@ if menu == "📌 Portfolio Snapshot":
                             orig_final = result["original_nav"].iloc[-1]
                             sim_final = result["sim_nav"].iloc[-1]
                             orig_return = (orig_final / total_mv - 1) * 100
-                            sim_return = (sim_final / total_mv - 1) * 100
+                            sim_return = (sim_final / sim_base_nav - 1) * 100
                             nav_diff = sim_final - orig_final
                             return_diff = sim_return - orig_return
 
@@ -2003,15 +2091,20 @@ if menu == "📌 Portfolio Snapshot":
 
                             # 매매 주수 계산
                             st.markdown("### 🛒 매매 주문 (Trade Orders)")
-                            st.caption("목표 비중 달성을 위해 매매해야 하는 주수입니다. (각 국가별 최종 영업일 종가 기준)")
+                            if use_additional_cash and additional_cash_krw > 0:
+                                st.caption(f"목표 비중 달성을 위해 매매해야 하는 주수입니다. (새 NAV ₩{sim_base_nav:,.0f} 기준, 각 국가별 최종 영업일 종가)")
+                            else:
+                                st.caption("목표 비중 달성을 위해 매매해야 하는 주수입니다. (각 국가별 최종 영업일 종가 기준)")
 
                             with st.spinner("매매 주수 계산 중..."):
                                 trades = calculate_trade_shares(
                                     result["original_weights"],
                                     result["sim_weights"],
-                                    total_mv,
+                                    sim_base_nav,  # 추가 현금 포함된 NAV 사용
                                     holdings,
-                                    new_positions
+                                    new_positions,
+                                    original_nav=total_mv,
+                                    additional_cash=additional_cash_krw if use_additional_cash else 0
                                 )
 
                             if trades:
