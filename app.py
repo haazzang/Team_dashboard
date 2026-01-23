@@ -701,6 +701,81 @@ def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holding
 
     return trades
 
+def calculate_portfolio_volatility(weights, lookback_days=30):
+    """
+    포트폴리오 변동성 계산 (30일 기준 표준편차)
+
+    Args:
+        weights: dict {ticker: weight}
+        lookback_days: 변동성 계산 기간 (기본 30일)
+
+    Returns:
+        dict with volatility metrics
+    """
+    if not weights:
+        return None
+
+    tickers = [t for t in weights.keys() if t]
+    if not tickers:
+        return None
+
+    # 가격 데이터 다운로드
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=lookback_days + 10)
+
+    prices = download_price_history(tickers, start_date, end_date)
+    if prices.empty:
+        return None
+
+    # 최근 lookback_days 일만 사용
+    prices = prices.tail(lookback_days + 1)
+    returns = prices.pct_change().dropna()
+
+    if returns.empty or len(returns) < 5:
+        return None
+
+    # 포트폴리오 일일 수익률 계산
+    port_returns = pd.Series(0.0, index=returns.index)
+    total_weight = 0
+    for ticker, weight in weights.items():
+        if ticker in returns.columns:
+            port_returns += returns[ticker] * weight
+            total_weight += weight
+
+    if total_weight == 0:
+        return None
+
+    # 변동성 계산 (연율화)
+    daily_vol = port_returns.std()
+    annual_vol = daily_vol * np.sqrt(252)
+
+    # 개별 종목 변동성
+    individual_vols = {}
+    for ticker in tickers:
+        if ticker in returns.columns:
+            ind_daily_vol = returns[ticker].std()
+            individual_vols[ticker] = ind_daily_vol * np.sqrt(252)
+
+    # 최대 손실 (기간 내)
+    cumulative = (1 + port_returns).cumprod()
+    rolling_max = cumulative.expanding().max()
+    drawdown = (cumulative - rolling_max) / rolling_max
+    max_drawdown = drawdown.min()
+
+    # VaR (95%, 99%)
+    var_95 = np.percentile(port_returns, 5)
+    var_99 = np.percentile(port_returns, 1)
+
+    return {
+        "daily_volatility": daily_vol,
+        "annual_volatility": annual_vol,
+        "max_drawdown": max_drawdown,
+        "var_95": var_95,
+        "var_99": var_99,
+        "individual_vols": individual_vols,
+        "returns": port_returns,
+    }
+
 def align_factor_returns(port_index, factor_prices):
     if factor_prices is None or factor_prices.empty or port_index is None or len(port_index) == 0:
         return pd.DataFrame()
@@ -1586,6 +1661,19 @@ if menu == "📌 Portfolio Snapshot":
                 c6.metric("Top 5 비중", f"{top5_weight:.2%}")
                 c7.metric("HHI", f"{hhi:.4f}")
                 c8.metric("유효 보유 종목 수", f"{eff_n:.1f}")
+
+                # 포트폴리오 변동성 계산
+                current_weights = holdings.set_index("YF_Symbol")["Weight"].to_dict()
+                with st.spinner("변동성 계산 중..."):
+                    vol_metrics = calculate_portfolio_volatility(current_weights, lookback_days=30)
+
+                if vol_metrics:
+                    c9, c10, c11, c12 = st.columns(4)
+                    c9.metric("30일 변동성 (연율)", f"{vol_metrics['annual_volatility']:.2%}")
+                    c10.metric("30일 MDD", f"{vol_metrics['max_drawdown']:.2%}")
+                    c11.metric("VaR 95%", f"{vol_metrics['var_95']:.2%}")
+                    c12.metric("VaR 99%", f"{vol_metrics['var_99']:.2%}")
+
                 st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
 
                 st.markdown("#### 🔎 보유 종목 비중")
@@ -1834,6 +1922,51 @@ if menu == "📌 Portfolio Snapshot":
                             m2.metric("시뮬레이션 NAV", f"{sim_final:,.0f}", delta=f"{nav_diff:,.0f}")
                             m3.metric("원래 수익률", f"{orig_return:.2f}%")
                             m4.metric("시뮬레이션 수익률", f"{sim_return:.2f}%", delta=f"{return_diff:+.2f}%")
+
+                            # 변동성 비교
+                            st.markdown("### 📉 변동성 비교 (30일 기준)")
+
+                            with st.spinner("변동성 계산 중..."):
+                                orig_vol = calculate_portfolio_volatility(result["original_weights"], lookback_days=30)
+                                sim_vol = calculate_portfolio_volatility(result["sim_weights"], lookback_days=30)
+
+                            if orig_vol and sim_vol:
+                                vol_diff = sim_vol["annual_volatility"] - orig_vol["annual_volatility"]
+                                mdd_diff = sim_vol["max_drawdown"] - orig_vol["max_drawdown"]
+                                var95_diff = sim_vol["var_95"] - orig_vol["var_95"]
+
+                                v1, v2, v3, v4 = st.columns(4)
+                                v1.metric("원래 변동성 (연율)", f"{orig_vol['annual_volatility']:.2%}")
+                                v2.metric("시뮬레이션 변동성", f"{sim_vol['annual_volatility']:.2%}",
+                                         delta=f"{vol_diff:+.2%}",
+                                         delta_color="inverse")  # 변동성 증가는 빨간색
+                                v3.metric("원래 VaR 95%", f"{orig_vol['var_95']:.2%}")
+                                v4.metric("시뮬레이션 VaR 95%", f"{sim_vol['var_95']:.2%}",
+                                         delta=f"{var95_diff:+.2%}",
+                                         delta_color="inverse")
+
+                                v5, v6, v7, v8 = st.columns(4)
+                                v5.metric("원래 MDD", f"{orig_vol['max_drawdown']:.2%}")
+                                v6.metric("시뮬레이션 MDD", f"{sim_vol['max_drawdown']:.2%}",
+                                         delta=f"{mdd_diff:+.2%}",
+                                         delta_color="inverse")
+                                v7.metric("원래 VaR 99%", f"{orig_vol['var_99']:.2%}")
+                                v8.metric("시뮬레이션 VaR 99%", f"{sim_vol['var_99']:.2%}")
+
+                                # 리스크/리턴 요약
+                                st.markdown("#### 리스크-리턴 요약")
+                                orig_sharpe = orig_return / (orig_vol['annual_volatility'] * 100) if orig_vol['annual_volatility'] > 0 else 0
+                                sim_sharpe = sim_return / (sim_vol['annual_volatility'] * 100) if sim_vol['annual_volatility'] > 0 else 0
+                                sharpe_diff = sim_sharpe - orig_sharpe
+
+                                rs1, rs2, rs3 = st.columns(3)
+                                rs1.metric("원래 샤프비율", f"{orig_sharpe:.3f}")
+                                rs2.metric("시뮬레이션 샤프비율", f"{sim_sharpe:.3f}", delta=f"{sharpe_diff:+.3f}")
+                                rs3.metric("리스크 조정 효과",
+                                          "개선" if sharpe_diff > 0 else "악화" if sharpe_diff < 0 else "동일",
+                                          delta=f"{sharpe_diff:+.3f}")
+                            else:
+                                st.warning("변동성을 계산할 수 없습니다.")
 
                             # 비중 변경 요약
                             st.markdown("### 📋 비중 변경 요약")
