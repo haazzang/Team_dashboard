@@ -398,7 +398,7 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
     Args:
         holdings_df: 현재 보유 종목 DataFrame (YF_Symbol, Weight, 원화평가금액 포함)
         weight_adjustments: dict {YF_Symbol: new_weight} - 기존 종목 비중 조절
-        new_positions: list of dict [{"ticker": str, "weight": float}] - 신규 종목 추가
+        new_positions: list of dict [{"ticker": str, "weight": float, "market": str}] - 신규 종목 추가
         base_nav: 기준 NAV (원화)
         simulation_days: 시뮬레이션 기간 (일)
 
@@ -465,6 +465,15 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
 
     sim_nav = base_nav * (1 + sim_port_returns).cumprod()
 
+    # 8. 섹터 정보 수집
+    original_sectors = holdings_df.set_index("YF_Symbol")["섹터"].to_dict() if "섹터" in holdings_df.columns else {}
+
+    # 신규 종목 섹터 조회
+    new_tickers_for_sector = [pos["ticker"] for pos in new_positions if pos["ticker"] and pos["ticker"] not in original_sectors]
+    if new_tickers_for_sector:
+        new_sector_map = fetch_sectors_cached(tuple(new_tickers_for_sector))
+        original_sectors.update(new_sector_map)
+
     return {
         "original_nav": original_nav,
         "sim_nav": sim_nav,
@@ -472,7 +481,74 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
         "sim_weights": sim_weights,
         "returns": returns,
         "prices": prices,
+        "sector_map": original_sectors,
     }
+
+def calculate_factor_exposure(weights, returns, simulation_days=30):
+    """
+    팩터 익스포저 계산 (베타 기반)
+
+    Args:
+        weights: dict {ticker: weight}
+        returns: DataFrame of returns
+        simulation_days: 분석 기간
+
+    Returns:
+        dict of factor exposures
+    """
+    # 팩터 ETF 정의
+    factor_etfs = {
+        "Market (SPY)": "SPY",
+        "Value (IWD)": "IWD",
+        "Growth (IWF)": "IWF",
+        "Momentum (MTUM)": "MTUM",
+        "Quality (QUAL)": "QUAL",
+        "Low Vol (USMV)": "USMV",
+        "Small Cap (IWM)": "IWM",
+        "EM (EEM)": "EEM",
+    }
+
+    # 팩터 가격 다운로드
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=simulation_days + 10)
+
+    factor_prices = download_price_history(list(factor_etfs.values()), start_date, end_date)
+    if factor_prices.empty:
+        return {}
+
+    factor_returns = factor_prices.pct_change().fillna(0).tail(simulation_days)
+
+    # 포트폴리오 수익률 계산
+    port_returns = pd.Series(0.0, index=returns.index)
+    for ticker, weight in weights.items():
+        if ticker in returns.columns:
+            port_returns += returns[ticker] * weight
+
+    port_returns = port_returns.tail(simulation_days)
+
+    # 각 팩터에 대한 베타 계산
+    exposures = {}
+    for factor_name, factor_ticker in factor_etfs.items():
+        if factor_ticker not in factor_returns.columns:
+            continue
+        factor_ret = factor_returns[factor_ticker]
+
+        # 공통 인덱스
+        common_idx = port_returns.index.intersection(factor_ret.index)
+        if len(common_idx) < 10:
+            continue
+
+        p_ret = port_returns.loc[common_idx]
+        f_ret = factor_ret.loc[common_idx]
+
+        # 베타 계산
+        cov = np.cov(p_ret, f_ret)[0, 1]
+        var = np.var(f_ret)
+        if var > 0:
+            beta = cov / var
+            exposures[factor_name] = beta
+
+    return exposures
 
 def align_factor_returns(port_index, factor_prices):
     if factor_prices is None or factor_prices.empty or port_index is None or len(port_index) == 0:
@@ -1477,20 +1553,35 @@ if menu == "📌 Portfolio Snapshot":
 
                 with col_new:
                     st.markdown("#### ➕ 신규 종목 추가")
-                    st.caption("추가할 종목 티커와 비중(%)을 입력하세요.")
+                    st.caption("추가할 종목 티커, 마켓, 비중(%)을 입력하세요.")
+
+                    # 마켓 옵션
+                    market_options = {
+                        "US": "미국 (기본)",
+                        "JP": "일본 (.T)",
+                        "HK": "홍콩 (.HK)",
+                        "KR": "한국 (.KS)"
+                    }
 
                     # 신규 종목 입력 (최대 5개)
                     new_positions = []
                     for i in range(5):
-                        c1, c2 = st.columns([2, 1])
+                        c1, c2, c3 = st.columns([2, 1, 1])
                         with c1:
-                            new_ticker = st.text_input(
+                            new_ticker_raw = st.text_input(
                                 f"티커 {i+1}",
                                 value="",
-                                placeholder="예: AAPL, MSFT, NVDA",
+                                placeholder="예: AAPL, 7203, 0700",
                                 key=f"new_ticker_{i}"
                             ).upper().strip()
                         with c2:
+                            new_market = st.selectbox(
+                                f"마켓 {i+1}",
+                                options=list(market_options.keys()),
+                                format_func=lambda x: market_options[x],
+                                key=f"new_market_{i}"
+                            )
+                        with c3:
                             new_weight_pct = st.number_input(
                                 f"비중 % {i+1}",
                                 min_value=0.0,
@@ -1500,11 +1591,34 @@ if menu == "📌 Portfolio Snapshot":
                                 format="%.2f",
                                 key=f"new_weight_{i}"
                             )
-                        if new_ticker and new_weight_pct > 0:
+
+                        # 티커 변환 (마켓에 따라 suffix 추가)
+                        if new_ticker_raw and new_weight_pct > 0:
+                            if new_market == "JP":
+                                final_ticker = f"{new_ticker_raw}.T" if not new_ticker_raw.endswith(".T") else new_ticker_raw
+                            elif new_market == "HK":
+                                # 홍콩은 4자리 숫자로 패딩
+                                if new_ticker_raw.isdigit():
+                                    final_ticker = f"{new_ticker_raw.zfill(4)}.HK"
+                                elif not new_ticker_raw.endswith(".HK"):
+                                    final_ticker = f"{new_ticker_raw}.HK"
+                                else:
+                                    final_ticker = new_ticker_raw
+                            elif new_market == "KR":
+                                final_ticker = f"{new_ticker_raw}.KS" if not new_ticker_raw.endswith(".KS") else new_ticker_raw
+                            else:
+                                final_ticker = new_ticker_raw
+
                             new_positions.append({
-                                "ticker": new_ticker,
-                                "weight": new_weight_pct / 100
+                                "ticker": final_ticker,
+                                "weight": new_weight_pct / 100,
+                                "market": new_market
                             })
+
+                    if new_positions:
+                        st.caption("**추가될 종목:**")
+                        for pos in new_positions:
+                            st.caption(f"  • {pos['ticker']} ({pos['weight']*100:.1f}%)")
 
                 st.markdown("---")
 
@@ -1602,6 +1716,159 @@ if menu == "📌 Portfolio Snapshot":
                                 )
                             else:
                                 st.info("비중 변경 사항이 없습니다.")
+
+                            # 섹터 비중 비교
+                            st.markdown("### 🧭 섹터 비중 비교")
+
+                            sector_map = result.get("sector_map", {})
+
+                            # 원래 포트폴리오 섹터 비중
+                            orig_sector_weights = {}
+                            for ticker, weight in result["original_weights"].items():
+                                sector = sector_map.get(ticker, "Unknown")
+                                orig_sector_weights[sector] = orig_sector_weights.get(sector, 0) + weight
+
+                            # 시뮬레이션 포트폴리오 섹터 비중
+                            sim_sector_weights = {}
+                            for ticker, weight in result["sim_weights"].items():
+                                sector = sector_map.get(ticker, "Unknown")
+                                sim_sector_weights[sector] = sim_sector_weights.get(sector, 0) + weight
+
+                            # 모든 섹터 합치기
+                            all_sectors_sim = sorted(set(orig_sector_weights.keys()) | set(sim_sector_weights.keys()))
+
+                            sector_comparison = []
+                            for sector in all_sectors_sim:
+                                orig_w = orig_sector_weights.get(sector, 0)
+                                sim_w = sim_sector_weights.get(sector, 0)
+                                sector_comparison.append({
+                                    "섹터": sector,
+                                    "원래 비중": orig_w,
+                                    "시뮬레이션 비중": sim_w,
+                                    "변경폭": sim_w - orig_w
+                                })
+
+                            df_sector_comp = pd.DataFrame(sector_comparison)
+                            df_sector_comp = df_sector_comp.sort_values("시뮬레이션 비중", ascending=False)
+
+                            # 섹터 비중 차트
+                            col_sector1, col_sector2 = st.columns(2)
+
+                            with col_sector1:
+                                fig_sector_orig = go.Figure(data=go.Pie(
+                                    labels=list(orig_sector_weights.keys()),
+                                    values=list(orig_sector_weights.values()),
+                                    hole=0.4,
+                                    title="원래 포트폴리오"
+                                ))
+                                fig_sector_orig.update_traces(textinfo="percent+label")
+                                st.plotly_chart(fig_sector_orig, use_container_width=True)
+
+                            with col_sector2:
+                                fig_sector_sim = go.Figure(data=go.Pie(
+                                    labels=list(sim_sector_weights.keys()),
+                                    values=list(sim_sector_weights.values()),
+                                    hole=0.4,
+                                    title="시뮬레이션 포트폴리오"
+                                ))
+                                fig_sector_sim.update_traces(textinfo="percent+label")
+                                st.plotly_chart(fig_sector_sim, use_container_width=True)
+
+                            # 섹터 비중 변화 바 차트
+                            df_sector_diff = df_sector_comp[df_sector_comp["변경폭"].abs() > 0.0001].copy()
+                            if not df_sector_diff.empty:
+                                colors_sector = np.where(df_sector_diff["변경폭"].values >= 0, "#16a34a", "#dc2626")
+                                fig_sector_diff = go.Figure(data=go.Bar(
+                                    x=df_sector_diff["섹터"],
+                                    y=df_sector_diff["변경폭"],
+                                    marker_color=colors_sector,
+                                    text=[f"{v:+.1%}" for v in df_sector_diff["변경폭"]],
+                                    textposition="auto"
+                                ))
+                                fig_sector_diff.update_layout(
+                                    title="섹터 비중 변화",
+                                    yaxis_tickformat=".1%",
+                                    xaxis_title="",
+                                    yaxis_title="비중 변화"
+                                )
+                                st.plotly_chart(fig_sector_diff, use_container_width=True)
+
+                            # 섹터 비중 테이블
+                            st.dataframe(
+                                df_sector_comp.style.format({
+                                    "원래 비중": "{:.2%}",
+                                    "시뮬레이션 비중": "{:.2%}",
+                                    "변경폭": "{:+.2%}"
+                                }).background_gradient(subset=["변경폭"], cmap="RdYlGn", vmin=-0.05, vmax=0.05),
+                                use_container_width=True
+                            )
+
+                            # 팩터 익스포저
+                            st.markdown("### 📈 팩터 익스포저 (Factor Exposure)")
+                            st.caption("팩터 ETF 대비 베타로 측정한 익스포저입니다.")
+
+                            with st.spinner("팩터 익스포저 계산 중..."):
+                                orig_exposure = calculate_factor_exposure(
+                                    result["original_weights"],
+                                    result["returns"],
+                                    sim_days
+                                )
+                                sim_exposure = calculate_factor_exposure(
+                                    result["sim_weights"],
+                                    result["returns"],
+                                    sim_days
+                                )
+
+                            if orig_exposure or sim_exposure:
+                                all_factors = sorted(set(orig_exposure.keys()) | set(sim_exposure.keys()))
+
+                                factor_comparison = []
+                                for factor in all_factors:
+                                    orig_exp = orig_exposure.get(factor, 0)
+                                    sim_exp = sim_exposure.get(factor, 0)
+                                    factor_comparison.append({
+                                        "팩터": factor,
+                                        "원래 익스포저": orig_exp,
+                                        "시뮬레이션 익스포저": sim_exp,
+                                        "변경폭": sim_exp - orig_exp
+                                    })
+
+                                df_factor = pd.DataFrame(factor_comparison)
+
+                                # 팩터 익스포저 비교 차트
+                                fig_factor = go.Figure()
+                                fig_factor.add_trace(go.Bar(
+                                    name="원래 포트폴리오",
+                                    x=df_factor["팩터"],
+                                    y=df_factor["원래 익스포저"],
+                                    marker_color="#6366f1"
+                                ))
+                                fig_factor.add_trace(go.Bar(
+                                    name="시뮬레이션 포트폴리오",
+                                    x=df_factor["팩터"],
+                                    y=df_factor["시뮬레이션 익스포저"],
+                                    marker_color="#f97316"
+                                ))
+                                fig_factor.update_layout(
+                                    title="팩터 익스포저 비교 (베타)",
+                                    barmode="group",
+                                    xaxis_title="",
+                                    yaxis_title="베타",
+                                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+                                )
+                                st.plotly_chart(fig_factor, use_container_width=True)
+
+                                # 팩터 익스포저 테이블
+                                st.dataframe(
+                                    df_factor.style.format({
+                                        "원래 익스포저": "{:.3f}",
+                                        "시뮬레이션 익스포저": "{:.3f}",
+                                        "변경폭": "{:+.3f}"
+                                    }).background_gradient(subset=["변경폭"], cmap="RdYlGn", vmin=-0.2, vmax=0.2),
+                                    use_container_width=True
+                                )
+                            else:
+                                st.warning("팩터 익스포저를 계산할 수 없습니다.")
 
 elif menu == "Total Portfolio (Team PNL)":
     st.subheader("📊 Total Team Portfolio Dashboard")
