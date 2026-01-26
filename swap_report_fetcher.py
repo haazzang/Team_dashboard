@@ -284,28 +284,32 @@ def parse_excel_report(filepath, filename, message_id, conn):
                     ''', (report_id, str(row[0]), str(row[1]) if len(row) > 1 and pd.notna(row[1]) else None))
 
         # Underlying 시트 파싱
-        underlying_sheet_names = ['Underlying', 'underlying', 'Component Underlying']
+        underlying_sheet_names = ['Underlying', 'underlying', 'Component Underlying', 'Component Underlyings']
         for sheet_name in sheet_names:
-            if any(u in sheet_name for u in underlying_sheet_names):
-                df_underlying = pd.read_excel(xlsx, sheet_name=sheet_name)
+            if any(u.lower() in sheet_name.lower() for u in underlying_sheet_names):
+                # 헤더가 Row 3에 있음 (0-indexed)
+                df_underlying = pd.read_excel(xlsx, sheet_name=sheet_name, header=3)
 
                 # 컬럼명 정리 (소문자로 변환하여 매핑)
                 df_underlying.columns = [str(c).strip() for c in df_underlying.columns]
 
                 for idx, row in df_underlying.iterrows():
-                    # 데이터 추출 (컬럼명은 실제 파일 구조에 따라 조정 필요)
-                    ticker = row.get('Ticker', row.get('ticker', row.get('Symbol', '')))
+                    # 데이터 추출 (실제 컬럼명: Quantity, Currency, Name, Country of issuer, Current Price,
+                    # Market Value (local), Market Value (USD), Sedol Code, RIC Code, etc.)
+                    # RIC Code에서 ticker 추출 (예: AMD.OQ -> AMD)
+                    ric_code = row.get('RIC Code', '')
+                    ticker = str(ric_code).split('.')[0] if pd.notna(ric_code) else ''
                     name = row.get('Name', row.get('name', row.get('Security Name', '')))
-                    quantity = row.get('Quantity', row.get('quantity', row.get('Qty', 0)))
-                    price = row.get('Price', row.get('price', row.get('Last Price', 0)))
-                    market_value = row.get('Market Value', row.get('market_value', row.get('MV', 0)))
-                    weight = row.get('Weight', row.get('weight', row.get('%', 0)))
-                    pnl = row.get('P&L', row.get('PnL', row.get('Pnl', 0)))
-                    pnl_pct = row.get('P&L %', row.get('PnL %', row.get('Return', 0)))
-                    contribution = row.get('Contribution', row.get('contribution', row.get('Contrib', 0)))
-                    sector = row.get('Sector', row.get('sector', ''))
-                    country = row.get('Country', row.get('country', ''))
-                    currency = row.get('Currency', row.get('currency', 'USD'))
+                    quantity = row.get('Quantity', 0)
+                    price = row.get('Current Price', row.get('Price', 0))
+                    market_value = row.get('Market Value (USD)', row.get('Market Value', 0))
+                    weight = row.get('Weight', row.get('Weight (%)', 0))
+                    pnl = row.get('PnL (USD)', row.get('P&L', row.get('PnL', 0)))
+                    pnl_pct = row.get('PnL (%)', row.get('P&L %', row.get('Return', 0)))
+                    contribution = row.get('Contribution', row.get('Contrib', 0))
+                    sector = row.get('Industry Group', row.get('Sector', ''))
+                    country = row.get('Country of issuer', row.get('Country', ''))
+                    currency = row.get('Currency', 'USD')
 
                     if pd.notna(ticker) and str(ticker).strip():
                         cursor.execute('''
