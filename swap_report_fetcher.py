@@ -332,23 +332,51 @@ def parse_excel_report(filepath, filename, message_id, conn):
                         ))
                 break
 
-        # Und 시트 파싱
+        # Und 시트 파싱 - PNL 데이터 추출
         for sheet_name in sheet_names:
             if sheet_name.lower() == 'und':
-                df_und = pd.read_excel(xlsx, sheet_name=sheet_name, header=None)
+                # 헤더가 Row 3에 있음
+                df_und = pd.read_excel(xlsx, sheet_name=sheet_name, header=3)
+                df_und.columns = [str(c).strip() for c in df_und.columns]
 
-                current_category = 'General'
+                # PNL 데이터를 underlying 테이블에 업데이트
                 for idx, row in df_und.iterrows():
-                    if len(row) >= 1 and pd.notna(row[0]):
-                        # 카테고리 감지 (볼드 텍스트나 빈 두 번째 컬럼)
-                        if len(row) == 1 or (len(row) >= 2 and pd.isna(row[1])):
-                            current_category = str(row[0])
-                        else:
+                    ticker_raw = row.get('TICKER', '')
+                    if pd.notna(ticker_raw) and str(ticker_raw).strip():
+                        # 티커 추출 (예: "AMD UW Equity" -> "AMD", "002896 CS Equity" -> "002896")
+                        ticker = str(ticker_raw).split()[0] if pd.notna(ticker_raw) else ''
+
+                        # PNL 값 추출
+                        pnl_col = None
+                        for col in df_und.columns:
+                            if 'TRADE_PNL' in col.upper() or 'PNL' in col.upper():
+                                pnl_col = col
+                                break
+
+                        if pnl_col:
+                            pnl_value = row.get(pnl_col, 0)
+                            pnl_value = float(pnl_value) if pd.notna(pnl_value) else 0
+
+                            # END_VALUE로 수익률 계산
+                            end_value_col = None
+                            for col in df_und.columns:
+                                if 'END_VALUE' in col.upper():
+                                    end_value_col = col
+                                    break
+
+                            end_value = row.get(end_value_col, 0) if end_value_col else 0
+                            end_value = float(end_value) if pd.notna(end_value) else 0
+
+                            # 수익률 계산 (PNL / (END_VALUE - PNL) * 100)
+                            base_value = end_value - pnl_value
+                            pnl_pct = (pnl_value / base_value * 100) if base_value != 0 else 0
+
+                            # underlying 테이블 업데이트
                             cursor.execute('''
-                                INSERT INTO und_summary (report_id, category, field_name, field_value)
-                                VALUES (?, ?, ?, ?)
-                            ''', (report_id, current_category, str(row[0]),
-                                  str(row[1]) if len(row) > 1 and pd.notna(row[1]) else None))
+                                UPDATE underlying
+                                SET pnl_usd = ?, pnl_pct = ?
+                                WHERE report_id = ? AND ticker = ?
+                            ''', (pnl_value, pnl_pct, report_id, ticker))
 
         conn.commit()
         print(f"DB 저장 완료: {filename}")
