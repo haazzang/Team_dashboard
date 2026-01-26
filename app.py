@@ -3066,12 +3066,22 @@ elif menu == "📑 Weekly Report Generator":
 elif menu == "📊 Swap Report Analysis":
     st.subheader("📊 Swap Report Analysis (JMLNKWGE)")
 
-    # SQLite DB 경로
-    SWAP_DB_FILE = Path(__file__).resolve().parent / 'swap_reports.db'
+    # SQLite DB 경로 - 여러 경로 시도
+    possible_paths = [
+        Path(__file__).resolve().parent / 'swap_reports.db',
+        Path('/Users/hyejinha/Desktop/Workspace/Team/swap_reports.db'),
+        Path.cwd() / 'swap_reports.db'
+    ]
+
+    SWAP_DB_FILE = None
+    for p in possible_paths:
+        if p.exists():
+            SWAP_DB_FILE = p
+            break
 
     def load_swap_data():
         """SQLite DB에서 Swap Report 데이터 로드"""
-        if not SWAP_DB_FILE.exists():
+        if SWAP_DB_FILE is None or not SWAP_DB_FILE.exists():
             return None, None, None, None
 
         conn = sqlite3.connect(SWAP_DB_FILE)

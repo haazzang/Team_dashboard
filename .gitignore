@@ -9,6 +9,5 @@ __pycache__/
 credentials.json
 token.json
 
-# Swap Report data
-swap_reports.db
+# Swap Report data (downloaded Excel files - too large)
 swap_reports/
