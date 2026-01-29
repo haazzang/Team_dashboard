@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.swapreport.autoupdate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/hyejinha/Desktop/Workspace/Team/auto_update_swap_reports.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hyejinha/Desktop/Workspace/Team</string>
+
+    <!-- 매일 오후 7시 (19:00)에 실행 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>19</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 로그 파일 -->
+    <key>StandardOutPath</key>
+    <string>/Users/hyejinha/Desktop/Workspace/Team/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hyejinha/Desktop/Workspace/Team/launchd_stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
