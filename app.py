@@ -257,6 +257,32 @@ def download_benchmarks_all(start_date, end_date):
         return pd.DataFrame()
 
 @st.cache_data
+def download_replication_benchmarks(start_date, end_date):
+    """Download benchmarks for replication analysis (SPX, NDX)"""
+    tickers = {'SPX': '^GSPC', 'NDX': '^NDX'}
+    try:
+        data = yf.download(list(tickers.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
+        if 'Adj Close' in data.columns:
+            df = data['Adj Close']
+        elif 'Close' in data.columns:
+            df = data['Close']
+        else:
+            df = data
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # [FIX] Remove Timezone
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
+        inv_map = {v: k for k, v in tickers.items()}
+        df.rename(columns=inv_map, inplace=True)
+        return df.ffill().pct_change().fillna(0)
+    except:
+        return pd.DataFrame()
+
+@st.cache_data
 def download_usdkrw(start_date, end_date):
     """Download USD/KRW Exchange Rate"""
     try:
@@ -1085,6 +1111,18 @@ def calculate_rolling_beta(port_ret, bench_ret, window=60):
         rolling_var = df['Bench'].rolling(window).var()
         beta = rolling_cov / rolling_var
         return beta.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+def calculate_rolling_r2(port_ret, bench_ret, window=60):
+    try:
+        df = pd.concat([port_ret, bench_ret], axis=1).dropna()
+        if len(df) < window:
+            return pd.Series(dtype=float)
+        df.columns = ['Port', 'Bench']
+        rolling_corr = df['Port'].rolling(window).corr(df['Bench'])
+        rolling_r2 = rolling_corr ** 2
+        return rolling_r2.dropna()
     except Exception:
         return pd.Series(dtype=float)
 
@@ -2597,6 +2635,8 @@ elif menu == "Total Portfolio (Team PNL)":
             df_cum_pnl = df_pnl.cumsum()
             df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
+            total_port_ret = df_pnl.sum(axis=1).div(df_pos.sum(axis=1).replace(0, np.nan)).fillna(0)
+            rep_bm = download_replication_benchmarks(df_pnl.index.min(), df_pnl.index.max())
             
             t1, t2, t3, t4, t5 = st.tabs(["📈 Chart", "📊 Analysis", "🔗 Correlation", "🌍 Cross Asset", "🧪 Simulation"])
             
@@ -2613,6 +2653,54 @@ elif menu == "Total Portfolio (Team PNL)":
                          if col in bm_cum.columns:
                             fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=f"{col} BM", line=dict(width=1, dash='dash')))
                 st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("#### 🧬 Index Replication (SPX/NDX)")
+                rep_target = st.radio(
+                    "Replication Target",
+                    ["Total Portfolio", "Selected Strategy"],
+                    horizontal=True,
+                    key="rep_target_total_pnl",
+                )
+                if rep_target == "Selected Strategy":
+                    rep_port = df_daily_ret[strat]
+                else:
+                    rep_port = total_port_ret
+
+                if rep_bm.empty:
+                    st.warning("Replication benchmark data download failed.")
+                else:
+                    spx_r2 = calculate_alpha_beta(rep_port, rep_bm.get('SPX', pd.Series(dtype=float)))[2] if 'SPX' in rep_bm.columns else np.nan
+                    ndx_r2 = calculate_alpha_beta(rep_port, rep_bm.get('NDX', pd.Series(dtype=float)))[2] if 'NDX' in rep_bm.columns else np.nan
+
+                    c_rep1, c_rep2 = st.columns(2)
+                    spx_disp = f"{spx_r2:.2%}" if pd.notnull(spx_r2) else "N/A"
+                    ndx_disp = f"{ndx_r2:.2%}" if pd.notnull(ndx_r2) else "N/A"
+                    c_rep1.metric("SPX Replication (R²)", spx_disp)
+                    c_rep2.metric("NDX Replication (R²)", ndx_disp)
+
+                    rep_window = st.slider(
+                        "Rolling window (trading days)",
+                        min_value=20,
+                        max_value=252,
+                        value=60,
+                        step=5,
+                        key="rep_window_total_pnl",
+                    )
+                    fig_rep = go.Figure()
+                    if 'SPX' in rep_bm.columns:
+                        spx_series = calculate_rolling_r2(rep_port, rep_bm['SPX'], window=rep_window)
+                        if not spx_series.empty:
+                            fig_rep.add_trace(go.Scatter(x=spx_series.index, y=spx_series, name="SPX R²"))
+                    if 'NDX' in rep_bm.columns:
+                        ndx_series = calculate_rolling_r2(rep_port, rep_bm['NDX'], window=rep_window)
+                        if not ndx_series.empty:
+                            fig_rep.add_trace(go.Scatter(x=ndx_series.index, y=ndx_series, name="NDX R²"))
+
+                    if fig_rep.data:
+                        fig_rep.update_layout(yaxis_title="R²", xaxis_title="Date", yaxis=dict(range=[0, 1]))
+                        st.plotly_chart(fig_rep, use_container_width=True)
+                    else:
+                        st.write("Insufficient data to compute rolling replication.")
             
             with t2:
                 stats = pd.DataFrame(index=df_daily_ret.columns)
@@ -2627,6 +2715,14 @@ elif menu == "Total Portfolio (Team PNL)":
                 
                 stats['MDD'] = ((1+df_daily_ret).cumprod() / (1+df_daily_ret).cumprod().cummax() - 1).min()
                 stats['Total Return'] = df_user_ret.iloc[-1]
+
+                if not rep_bm.empty:
+                    stats['SPX Replication (R²)'] = df_daily_ret.apply(
+                        lambda x: calculate_alpha_beta(x, rep_bm['SPX'])[2] if 'SPX' in rep_bm.columns else np.nan
+                    )
+                    stats['NDX Replication (R²)'] = df_daily_ret.apply(
+                        lambda x: calculate_alpha_beta(x, rep_bm['NDX'])[2] if 'NDX' in rep_bm.columns else np.nan
+                    )
                 
                 disp = stats.copy()
                 for c in disp.columns:
