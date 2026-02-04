@@ -1040,6 +1040,40 @@ def calculate_portfolio_volatility(weights, lookback_days=30):
         "returns": port_returns,
     }
 
+def calculate_portfolio_returns(weights, lookback_days=60):
+    """
+    포트폴리오 일일 수익률 계산 (lookback_days 기준)
+    """
+    if not weights:
+        return pd.Series(dtype=float)
+
+    tickers = [t for t in weights.keys() if t]
+    if not tickers:
+        return pd.Series(dtype=float)
+
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=lookback_days + 10)
+
+    prices = download_price_history(tickers, start_date, end_date)
+    if prices.empty:
+        return pd.Series(dtype=float)
+
+    prices = prices.tail(lookback_days + 1)
+    returns = prices.pct_change().dropna()
+    if returns.empty:
+        return pd.Series(dtype=float)
+
+    valid_weights = {t: w for t, w in weights.items() if t in returns.columns and w is not None}
+    total_weight = sum(valid_weights.values())
+    if total_weight == 0:
+        return pd.Series(dtype=float)
+
+    port_returns = pd.Series(0.0, index=returns.index)
+    for ticker, weight in valid_weights.items():
+        port_returns += returns[ticker] * (weight / total_weight)
+
+    return port_returns.dropna()
+
 def align_factor_returns(port_index, factor_prices):
     if factor_prices is None or factor_prices.empty or port_index is None or len(port_index) == 0:
         return pd.DataFrame()
@@ -1962,19 +1996,78 @@ if menu == "📌 Portfolio Snapshot":
             with st.spinner("변동성 계산 중..."):
                 vol_metrics = calculate_portfolio_volatility(current_weights, lookback_days=30)
 
-            if vol_metrics:
-                c9, c10, c11, c12 = st.columns(4)
-                c9.metric("30일 변동성 (연율)", f"{vol_metrics['annual_volatility']:.2%}")
-                c10.metric("30일 MDD", f"{vol_metrics['max_drawdown']:.2%}")
-                c11.metric("VaR 95%", f"{vol_metrics['var_95']:.2%}")
-                c12.metric("VaR 99%", f"{vol_metrics['var_99']:.2%}")
+                if vol_metrics:
+                    c9, c10, c11, c12 = st.columns(4)
+                    c9.metric("30일 변동성 (연율)", f"{vol_metrics['annual_volatility']:.2%}")
+                    c10.metric("30일 MDD", f"{vol_metrics['max_drawdown']:.2%}")
+                    c11.metric("VaR 95%", f"{vol_metrics['var_95']:.2%}")
+                    c12.metric("VaR 99%", f"{vol_metrics['var_99']:.2%}")
 
-            st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
+                st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
 
-            st.markdown("#### 🔎 보유 종목 비중")
-            top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
-            fig_hold = go.Figure(
-                data=go.Bar(
+                st.markdown("#### 🧬 지수 복제율 (Holdings-based)")
+                st.caption("보유 비중 기준 최근 수익률로 계산한 SPX/NDX 복제율(R²)입니다.")
+                rep_lookback = st.slider(
+                    "Lookback window (trading days)",
+                    min_value=20,
+                    max_value=252,
+                    value=120,
+                    step=5,
+                    key="rep_snapshot_lookback",
+                )
+                with st.spinner("복제율 계산 중..."):
+                    port_ret = calculate_portfolio_returns(current_weights, lookback_days=rep_lookback)
+
+                if port_ret.empty:
+                    st.warning("복제율을 계산할 수 없습니다. (가격 데이터 부족)")
+                else:
+                    rep_bm = download_replication_benchmarks(port_ret.index.min(), port_ret.index.max())
+                    if rep_bm.empty:
+                        st.warning("Replication benchmark data download failed.")
+                    else:
+                        spx_ret = rep_bm['SPX'].reindex(port_ret.index) if 'SPX' in rep_bm.columns else pd.Series(dtype=float)
+                        ndx_ret = rep_bm['NDX'].reindex(port_ret.index) if 'NDX' in rep_bm.columns else pd.Series(dtype=float)
+
+                        spx_r2 = calculate_alpha_beta(port_ret, spx_ret)[2] if not spx_ret.empty else np.nan
+                        ndx_r2 = calculate_alpha_beta(port_ret, ndx_ret)[2] if not ndx_ret.empty else np.nan
+
+                        c_rep1, c_rep2 = st.columns(2)
+                        spx_disp = f"{spx_r2:.2%}" if pd.notnull(spx_r2) else "N/A"
+                        ndx_disp = f"{ndx_r2:.2%}" if pd.notnull(ndx_r2) else "N/A"
+                        c_rep1.metric("SPX Replication (R²)", spx_disp)
+                        c_rep2.metric("NDX Replication (R²)", ndx_disp)
+
+                        if len(port_ret) >= 20:
+                            rep_window = st.slider(
+                                "Rolling window (trading days)",
+                                min_value=20,
+                                max_value=min(252, len(port_ret)),
+                                value=min(60, len(port_ret)),
+                                step=5,
+                                key="rep_snapshot_window",
+                            )
+                            fig_rep = go.Figure()
+                            if not spx_ret.empty:
+                                spx_series = calculate_rolling_r2(port_ret, spx_ret, window=rep_window)
+                                if not spx_series.empty:
+                                    fig_rep.add_trace(go.Scatter(x=spx_series.index, y=spx_series, name="SPX R²"))
+                            if not ndx_ret.empty:
+                                ndx_series = calculate_rolling_r2(port_ret, ndx_ret, window=rep_window)
+                                if not ndx_series.empty:
+                                    fig_rep.add_trace(go.Scatter(x=ndx_series.index, y=ndx_series, name="NDX R²"))
+
+                            if fig_rep.data:
+                                fig_rep.update_layout(yaxis_title="R²", xaxis_title="Date", yaxis=dict(range=[0, 1]))
+                                st.plotly_chart(fig_rep, use_container_width=True)
+                            else:
+                                st.write("Insufficient data to compute rolling replication.")
+                        else:
+                            st.write("Not enough data for rolling replication (need 20+ data points).")
+
+                st.markdown("#### 🔎 보유 종목 비중")
+                top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
+                fig_hold = go.Figure(
+                    data=go.Bar(
                     x=top_holdings["Label"],
                     y=top_holdings["Weight"],
                     text=[f"{w:.2%}" for w in top_holdings["Weight"]],
@@ -2728,8 +2821,6 @@ elif menu == "Total Portfolio (Team PNL)":
             df_cum_pnl = df_pnl.cumsum()
             df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
-            total_port_ret = df_pnl.sum(axis=1).div(df_pos.sum(axis=1).replace(0, np.nan)).fillna(0)
-            rep_bm = download_replication_benchmarks(df_pnl.index.min(), df_pnl.index.max())
             
             t1, t2, t3, t4, t5 = st.tabs(["📈 Chart", "📊 Analysis", "🔗 Correlation", "🌍 Cross Asset", "🧪 Simulation"])
             
@@ -2746,54 +2837,6 @@ elif menu == "Total Portfolio (Team PNL)":
                          if col in bm_cum.columns:
                             fig.add_trace(go.Scatter(x=bm_cum.index, y=bm_cum[col], name=f"{col} BM", line=dict(width=1, dash='dash')))
                 st.plotly_chart(fig, use_container_width=True)
-
-                st.markdown("#### 🧬 Index Replication (SPX/NDX)")
-                rep_target = st.radio(
-                    "Replication Target",
-                    ["Total Portfolio", "Selected Strategy"],
-                    horizontal=True,
-                    key="rep_target_total_pnl",
-                )
-                if rep_target == "Selected Strategy":
-                    rep_port = df_daily_ret[strat]
-                else:
-                    rep_port = total_port_ret
-
-                if rep_bm.empty:
-                    st.warning("Replication benchmark data download failed.")
-                else:
-                    spx_r2 = calculate_alpha_beta(rep_port, rep_bm.get('SPX', pd.Series(dtype=float)))[2] if 'SPX' in rep_bm.columns else np.nan
-                    ndx_r2 = calculate_alpha_beta(rep_port, rep_bm.get('NDX', pd.Series(dtype=float)))[2] if 'NDX' in rep_bm.columns else np.nan
-
-                    c_rep1, c_rep2 = st.columns(2)
-                    spx_disp = f"{spx_r2:.2%}" if pd.notnull(spx_r2) else "N/A"
-                    ndx_disp = f"{ndx_r2:.2%}" if pd.notnull(ndx_r2) else "N/A"
-                    c_rep1.metric("SPX Replication (R²)", spx_disp)
-                    c_rep2.metric("NDX Replication (R²)", ndx_disp)
-
-                    rep_window = st.slider(
-                        "Rolling window (trading days)",
-                        min_value=20,
-                        max_value=252,
-                        value=60,
-                        step=5,
-                        key="rep_window_total_pnl",
-                    )
-                    fig_rep = go.Figure()
-                    if 'SPX' in rep_bm.columns:
-                        spx_series = calculate_rolling_r2(rep_port, rep_bm['SPX'], window=rep_window)
-                        if not spx_series.empty:
-                            fig_rep.add_trace(go.Scatter(x=spx_series.index, y=spx_series, name="SPX R²"))
-                    if 'NDX' in rep_bm.columns:
-                        ndx_series = calculate_rolling_r2(rep_port, rep_bm['NDX'], window=rep_window)
-                        if not ndx_series.empty:
-                            fig_rep.add_trace(go.Scatter(x=ndx_series.index, y=ndx_series, name="NDX R²"))
-
-                    if fig_rep.data:
-                        fig_rep.update_layout(yaxis_title="R²", xaxis_title="Date", yaxis=dict(range=[0, 1]))
-                        st.plotly_chart(fig_rep, use_container_width=True)
-                    else:
-                        st.write("Insufficient data to compute rolling replication.")
             
             with t2:
                 stats = pd.DataFrame(index=df_daily_ret.columns)
@@ -2808,14 +2851,6 @@ elif menu == "Total Portfolio (Team PNL)":
                 
                 stats['MDD'] = ((1+df_daily_ret).cumprod() / (1+df_daily_ret).cumprod().cummax() - 1).min()
                 stats['Total Return'] = df_user_ret.iloc[-1]
-
-                if not rep_bm.empty:
-                    stats['SPX Replication (R²)'] = df_daily_ret.apply(
-                        lambda x: calculate_alpha_beta(x, rep_bm['SPX'])[2] if 'SPX' in rep_bm.columns else np.nan
-                    )
-                    stats['NDX Replication (R²)'] = df_daily_ret.apply(
-                        lambda x: calculate_alpha_beta(x, rep_bm['NDX'])[2] if 'NDX' in rep_bm.columns else np.nan
-                    )
                 
                 disp = stats.copy()
                 for c in disp.columns:
