@@ -40,6 +40,11 @@ except ModuleNotFoundError:
 # --- Page Config ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
 st.title("Team Portfolio Analysis Dashboard")
+try:
+    build_ts = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    st.sidebar.caption(f"Build: {build_ts}")
+except Exception:
+    pass
 
 # ==============================================================================
 # [Helper Functions] - Fixed Timezone Issues
