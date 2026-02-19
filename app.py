@@ -467,6 +467,55 @@ def fetch_latest_prices(tickers):
             pass
     return prices
 
+@st.cache_data(ttl=1800)
+def fetch_prev_day_returns(tickers):
+    """보유 종목의 최근 거래일 전일 대비 등락률 계산"""
+    output_cols = ["YF_Symbol", "전일등락률", "최근거래일", "직전거래일", "최근종가", "직전종가"]
+    clean_tickers = tuple(sorted({str(t).strip() for t in tickers if t and str(t).strip()}))
+    if not clean_tickers:
+        return pd.DataFrame(columns=output_cols)
+
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=20)
+    prices = download_price_history(list(clean_tickers), start_date, end_date)
+    if prices.empty:
+        return pd.DataFrame(columns=output_cols)
+
+    rows = []
+    for ticker in clean_tickers:
+        if ticker not in prices.columns:
+            continue
+
+        s = prices[ticker].dropna()
+        if len(s) < 2:
+            rows.append({
+                "YF_Symbol": ticker,
+                "전일등락률": np.nan,
+                "최근거래일": pd.Timestamp(s.index[-1]) if len(s) == 1 else pd.NaT,
+                "직전거래일": pd.NaT,
+                "최근종가": float(s.iloc[-1]) if len(s) == 1 else np.nan,
+                "직전종가": np.nan,
+            })
+            continue
+
+        latest_close = float(s.iloc[-1])
+        prev_close = float(s.iloc[-2])
+        if pd.isna(prev_close) or prev_close == 0:
+            pct_chg = np.nan
+        else:
+            pct_chg = latest_close / prev_close - 1
+
+        rows.append({
+            "YF_Symbol": ticker,
+            "전일등락률": pct_chg,
+            "최근거래일": pd.Timestamp(s.index[-1]),
+            "직전거래일": pd.Timestamp(s.index[-2]),
+            "최근종가": latest_close,
+            "직전종가": prev_close,
+        })
+
+    return pd.DataFrame(rows, columns=output_cols)
+
 def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_nav, simulation_days=30, additional_cash=0, original_nav=None):
     """
     포트폴리오 시뮬레이션 수행
@@ -1980,8 +2029,12 @@ if menu == "📌 Portfolio Snapshot":
         # 시뮬레이션용 holdings 데이터 준비
         holdings["YF_Symbol"] = holdings["Group_ID"]
 
-        # 탭 생성: 현황 / 시뮬레이션
-        tab_snapshot, tab_simulation = st.tabs(["📊 포트폴리오 현황", "🔬 포트폴리오 시뮬레이션"])
+        # 탭 생성: 현황 / 전일 등락률 / 시뮬레이션
+        tab_snapshot, tab_heatmap, tab_simulation = st.tabs([
+            "📊 포트폴리오 현황",
+            "🟩 전일 등락률 Heatmap",
+            "🔬 포트폴리오 시뮬레이션",
+        ])
 
         with tab_snapshot:
             c1, c2, c3, c4 = st.columns(4)
@@ -2237,6 +2290,98 @@ if menu == "📌 Portfolio Snapshot":
                 "원화평가금액": "{:,.0f}",
                 "Weight": "{:.2%}",
             }))
+
+        with tab_heatmap:
+            st.markdown("### 🟩 보유 종목 전일 등락률 Heatmap")
+            st.caption("사이즈는 원화평가금액, 색상은 최근 거래일 기준 전일 등락률입니다.")
+
+            with st.spinner("전일 등락률 계산 중..."):
+                prev_ret = fetch_prev_day_returns(tuple(holdings["YF_Symbol"].dropna().unique()))
+
+            heatmap_df = holdings.copy()
+            heatmap_df = heatmap_df[heatmap_df["YF_Symbol"].notna()].copy()
+            heatmap_df = heatmap_df.merge(prev_ret, on="YF_Symbol", how="left")
+            heatmap_df["Heatmap_Label"] = (
+                heatmap_df["종목명"].astype(str) + " (" + heatmap_df["YF_Symbol"].astype(str) + ")"
+            )
+            heatmap_df["최근거래일_문자열"] = pd.to_datetime(heatmap_df["최근거래일"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("-")
+            heatmap_df["직전거래일_문자열"] = pd.to_datetime(heatmap_df["직전거래일"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("-")
+
+            if heatmap_df.empty:
+                st.warning("Heatmap을 표시할 보유 종목이 없습니다.")
+            else:
+                plot_df = heatmap_df.dropna(subset=["전일등락률"]).copy()
+                plot_df = plot_df[plot_df["원화평가금액"] > 0].copy()
+
+                if plot_df.empty:
+                    st.warning("최근 2개 거래일 가격 데이터가 없어 heatmap을 표시할 수 없습니다.")
+                else:
+                    max_abs = float(np.nanmax(np.abs(plot_df["전일등락률"].values)))
+                    if not np.isfinite(max_abs) or max_abs == 0:
+                        max_abs = 0.01
+
+                    fig_daily_heatmap = px.treemap(
+                        plot_df,
+                        path=[px.Constant("Portfolio"), "섹터", "Heatmap_Label"],
+                        values="원화평가금액",
+                        color="전일등락률",
+                        color_continuous_scale=[(0.0, "#b91c1c"), (0.5, "#f8fafc"), (1.0, "#15803d")],
+                        color_continuous_midpoint=0.0,
+                        custom_data=["YF_Symbol", "Weight", "전일등락률", "최근거래일_문자열", "직전거래일_문자열"],
+                    )
+                    fig_daily_heatmap.update_traces(
+                        texttemplate="%{label}<br>%{customdata[2]:+.2%}",
+                        hovertemplate=(
+                            "<b>%{label}</b><br>"
+                            "Ticker: %{customdata[0]}<br>"
+                            "Weight: %{customdata[1]:.2%}<br>"
+                            "MV: %{value:,.0f} KRW<br>"
+                            "전일 등락률: %{customdata[2]:+.2%}<br>"
+                            "최근 거래일: %{customdata[3]}<br>"
+                            "직전 거래일: %{customdata[4]}<extra></extra>"
+                        ),
+                    )
+                    fig_daily_heatmap.update_coloraxes(
+                        cmin=-max_abs,
+                        cmax=max_abs,
+                        colorbar=dict(title="전일 등락률", tickformat=".2%"),
+                    )
+                    fig_daily_heatmap.update_layout(margin=dict(t=30, l=10, r=10, b=10))
+                    st.plotly_chart(fig_daily_heatmap, use_container_width=True)
+
+                ranked = heatmap_df.dropna(subset=["전일등락률"]).sort_values("전일등락률")
+                if not ranked.empty:
+                    top_loser = ranked.iloc[0]
+                    top_gainer = ranked.iloc[-1]
+                    coverage = len(ranked) / len(heatmap_df) if len(heatmap_df) > 0 else 0
+                    c_gain, c_loss, c_cov = st.columns(3)
+                    c_gain.metric("Top Gainer", str(top_gainer["종목명"]), f"{top_gainer['전일등락률']:+.2%}")
+                    c_loss.metric("Top Loser", str(top_loser["종목명"]), f"{top_loser['전일등락률']:+.2%}")
+                    c_cov.metric("가격 커버리지", f"{coverage:.1%}")
+
+                missing_count = int(heatmap_df["전일등락률"].isna().sum())
+                if missing_count > 0:
+                    st.info(f"{missing_count}개 종목은 가격 데이터 부족으로 전일 등락률이 표시되지 않습니다.")
+
+                st.markdown("#### 📋 전일 등락률 상세")
+                detail_cols = [
+                    "YF_Symbol", "종목명", "섹터", "Weight", "원화평가금액",
+                    "전일등락률", "최근거래일", "직전거래일", "최근종가", "직전종가",
+                ]
+                detail_cols = [c for c in detail_cols if c in heatmap_df.columns]
+                detail_df = heatmap_df.sort_values("전일등락률", ascending=False)
+                st.dataframe(
+                    detail_df[detail_cols].style.format({
+                        "Weight": "{:.2%}",
+                        "원화평가금액": "{:,.0f}",
+                        "전일등락률": "{:+.2%}",
+                        "최근종가": "{:,.2f}",
+                        "직전종가": "{:,.2f}",
+                    }).format({
+                        "최근거래일": lambda x: x.strftime("%Y-%m-%d") if pd.notnull(x) else "-",
+                        "직전거래일": lambda x: x.strftime("%Y-%m-%d") if pd.notnull(x) else "-",
+                    })
+                )
 
         with tab_simulation:
             st.markdown("### 🔬 포트폴리오 비중 시뮬레이션")
