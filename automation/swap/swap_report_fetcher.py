@@ -12,10 +12,10 @@ Swap Report Fetcher - Gmail에서 Swap Report 첨부파일을 다운로드하고
    - User Type: External (또는 Internal if Workspace)
    - App name, email 입력
    - Scopes에 'https://www.googleapis.com/auth/gmail.readonly' 추가
-6. credentials.json 파일을 이 스크립트와 같은 폴더에 저장
+6. credentials.json 파일을 Team 루트 폴더에 저장
 
 실행:
-    python swap_report_fetcher.py
+    python automation/swap/swap_report_fetcher.py
 """
 
 import os
@@ -44,10 +44,11 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 # 설정
 SCRIPT_DIR = Path(__file__).resolve().parent
-CREDENTIALS_FILE = SCRIPT_DIR / 'credentials.json'
-TOKEN_FILE = SCRIPT_DIR / 'token.json'
-DB_FILE = SCRIPT_DIR / 'swap_reports.db'
-DOWNLOAD_DIR = SCRIPT_DIR / 'swap_reports'
+ROOT_DIR = SCRIPT_DIR.parents[1]
+CREDENTIALS_FILE = ROOT_DIR / 'credentials.json'
+TOKEN_FILE = ROOT_DIR / 'token.json'
+DB_FILE = ROOT_DIR / 'swap_reports.db'
+DOWNLOAD_DIR = ROOT_DIR / 'swap_reports'
 
 # 검색할 메일 제목
 MAIL_SUBJECT = 'FW: JMLNKWGE Synthetic Portfolio EOD Report'
@@ -433,7 +434,7 @@ def fetch_and_store_reports():
         print("1. Google Cloud Console (https://console.cloud.google.com) 접속")
         print("2. 프로젝트 생성 후 Gmail API 활성화")
         print("3. OAuth 2.0 credentials 생성 (Desktop app)")
-        print("4. credentials.json 다운로드 후 이 폴더에 저장")
+        print("4. credentials.json 다운로드 후 Team 루트 폴더에 저장")
 
     except Exception as e:
         print(f"\n오류 발생: {e}")

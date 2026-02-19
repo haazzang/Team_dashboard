@@ -32,7 +32,7 @@ gcloud pubsub subscriptions create gmail-push-sub \
 ```bash
 # 터미널 1: 서버 실행
 pip install flask
-python gmail_webhook_server.py
+python automation/swap/gmail_webhook_server.py
 
 # 터미널 2: ngrok으로 외부 노출
 ngrok http 5000
@@ -63,7 +63,7 @@ gcloud run deploy gmail-webhook \
 
 ```python
 # Python 콘솔에서 실행
-from gmail_webhook_server import get_gmail_service, setup_gmail_watch
+from automation.swap.gmail_webhook_server import get_gmail_service, setup_gmail_watch
 import os
 
 os.environ['GOOGLE_CLOUD_PROJECT'] = 'your-project-id'
@@ -101,10 +101,10 @@ Pub/Sub 설정이 복잡하다면, 간단히 주기적으로 체크하는 방식
 ```bash
 # Mac: crontab -e
 # 매일 오후 7시에 실행
-0 19 * * * cd /Users/hyejinha/Desktop/Workspace/Team && /usr/bin/python3 swap_report_fetcher.py >> cron.log 2>&1
+0 19 * * * cd /Users/hyejinha/Desktop/Workspace/Team && /usr/bin/python3 automation/swap/swap_report_fetcher.py >> cron.log 2>&1
 
 # 또는 30분마다 실행
-*/30 * * * * cd /Users/hyejinha/Desktop/Workspace/Team && /usr/bin/python3 swap_report_fetcher.py >> cron.log 2>&1
+*/30 * * * * cd /Users/hyejinha/Desktop/Workspace/Team && /usr/bin/python3 automation/swap/swap_report_fetcher.py >> cron.log 2>&1
 ```
 
 ## 7. 문제 해결
@@ -113,7 +113,7 @@ Pub/Sub 설정이 복잡하다면, 간단히 주기적으로 체크하는 방식
 Gmail Watch는 7일 후 만료됩니다. 자동 갱신을 위해:
 ```python
 # 매일 실행되는 cron job 추가
-0 0 * * * python -c "from gmail_webhook_server import *; setup_gmail_watch(get_gmail_service())"
+0 0 * * * python -c "from automation.swap.gmail_webhook_server import *; setup_gmail_watch(get_gmail_service())"
 ```
 
 ### 인증 오류

@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/hyejinha/Desktop/Workspace/Team/auto_update_swap_reports.py</string>
+        <string>/Users/hyejinha/Desktop/Workspace/Team/automation/swap/auto_update_swap_reports.py</string>
     </array>
 
     <key>WorkingDirectory</key>
