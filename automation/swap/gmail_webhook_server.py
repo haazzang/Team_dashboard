@@ -6,7 +6,7 @@ Gmail에서 새 메일이 도착하면 자동으로 Swap Report를 처리합니�
 설정 방법:
 1. Google Cloud Console에서 Pub/Sub 설정
 2. ngrok 또는 서버로 webhook 엔드포인트 노출
-3. 이 서버 실행: python gmail_webhook_server.py
+3. 이 서버 실행: python automation/swap/gmail_webhook_server.py
 """
 
 import os
@@ -19,14 +19,24 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 
 # swap_report_fetcher 모듈 import
-from swap_report_fetcher import (
-    get_gmail_service,
-    init_database,
-    process_message,
-    parse_excel_report,
-    DB_FILE,
-    MAIL_SUBJECT
-)
+try:
+    from .swap_report_fetcher import (
+        get_gmail_service,
+        init_database,
+        process_message,
+        parse_excel_report,
+        DB_FILE,
+        MAIL_SUBJECT,
+    )
+except ImportError:
+    from swap_report_fetcher import (
+        get_gmail_service,
+        init_database,
+        process_message,
+        parse_excel_report,
+        DB_FILE,
+        MAIL_SUBJECT,
+    )
 
 app = Flask(__name__)
 
