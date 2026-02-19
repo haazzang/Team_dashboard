@@ -84,7 +84,27 @@ def normalize_yf_ticker(symbol, currency=None):
 def is_etf_value(value):
     if value is None:
         return False
-    return "ETF" in str(value).strip().upper()
+    text = str(value).strip().upper()
+    if text in ("", "NAN", "NONE"):
+        return False
+    keywords = ("ETF", "ETN", "EXCHANGE TRADED FUND", "INDEX FUND", "TRACKER FUND")
+    return any(k in text for k in keywords)
+
+def is_etf_from_info(info):
+    if not isinstance(info, dict):
+        return False
+
+    quote_type = str(info.get("quoteType", "")).strip().upper()
+    if quote_type in ("ETF", "ETN"):
+        return True
+
+    if is_etf_value(info.get("sector")):
+        return True
+
+    for key in ("longName", "shortName", "fundFamily", "category"):
+        if is_etf_value(info.get(key)):
+            return True
+    return False
 
 @st.cache_data(ttl=3600)
 def fetch_sectors_cached(tickers):
@@ -94,12 +114,31 @@ def fetch_sectors_cached(tickers):
             t_str = str(t).strip()
             if t_str:
                 info = yf.Ticker(t_str).info
-                sector_map[t] = info.get('sector', 'Unknown')
+                if is_etf_from_info(info):
+                    sector_map[t] = "ETF"
+                else:
+                    sector = info.get("sector")
+                    sector_map[t] = str(sector).strip() if sector is not None and str(sector).strip() else "Unknown"
             else:
                 sector_map[t] = 'Unknown'
         except:
             sector_map[t] = 'Unknown'
     return sector_map
+
+@st.cache_data(ttl=3600)
+def fetch_etf_flags_cached(tickers):
+    etf_map = {}
+    for t in tickers:
+        try:
+            t_str = str(t).strip()
+            if not t_str:
+                etf_map[t] = False
+                continue
+            info = yf.Ticker(t_str).info
+            etf_map[t] = is_etf_from_info(info)
+        except:
+            etf_map[t] = False
+    return etf_map
 
 def _normalize_sp500_symbol(symbol):
     sym = _clean_symbol(symbol)
@@ -1741,17 +1780,20 @@ def load_cash_equity_data(file):
         if id_col not in eq.columns: id_col = '종목명'
         eq['Ticker_ID'] = eq[id_col].fillna('Unknown')
 
+        def _resolve_yf_symbol(row):
+            base = row.get('Symbol') if 'Symbol' in row else None
+            if base is None or (isinstance(base, str) and base.strip() == '') or pd.isna(base):
+                base = row.get('Ticker') if 'Ticker' in row else None
+            if base is None or (isinstance(base, str) and base.strip() == '') or pd.isna(base):
+                base = row.get('Ticker_ID') if 'Ticker_ID' in row else None
+            return normalize_yf_ticker(base, row.get('통화'))
+
+        eq['YF_Symbol'] = eq.apply(_resolve_yf_symbol, axis=1)
+
         if '섹터' not in eq.columns:
-            if 'Symbol' in eq.columns:
-                def _resolve_yf_symbol(row):
-                    base = row.get('Symbol')
-                    if base is None or (isinstance(base, str) and base.strip() == '') or pd.isna(base):
-                        if 'Ticker_ID' in row:
-                            base = row.get('Ticker_ID')
-                    return normalize_yf_ticker(base, row.get('통화'))
-                eq['YF_Symbol'] = eq.apply(_resolve_yf_symbol, axis=1)
-                uniques = eq['YF_Symbol'].dropna().unique()
-                sec_map = fetch_sectors_cached(tuple(uniques))
+            uniques = tuple(sorted(eq['YF_Symbol'].dropna().unique()))
+            if uniques:
+                sec_map = fetch_sectors_cached(uniques)
                 eq['섹터'] = eq['YF_Symbol'].map(sec_map).fillna('Unknown')
             else:
                 eq['섹터'] = 'Unknown'
@@ -1763,6 +1805,10 @@ def load_cash_equity_data(file):
             etf_mask |= eq['상품구분'].apply(is_etf_value)
         if '종목명' in eq.columns:
             etf_mask |= eq['종목명'].apply(is_etf_value)
+        etf_tickers = tuple(sorted(eq["YF_Symbol"].dropna().unique()))
+        if etf_tickers:
+            etf_symbol_map = fetch_etf_flags_cached(etf_tickers)
+            etf_mask |= eq["YF_Symbol"].map(etf_symbol_map).fillna(False)
         eq.loc[etf_mask, '섹터'] = 'ETF'
 
         if '통화' in eq.columns:
@@ -1980,6 +2026,10 @@ if menu == "📌 Portfolio Snapshot":
             etf_mask |= latest_all["상품구분"].apply(is_etf_value)
         if "종목명" in latest_all.columns:
             etf_mask |= latest_all["종목명"].apply(is_etf_value)
+        etf_tickers = tuple(sorted(latest_all["YF_Symbol"].dropna().unique()))
+        if etf_tickers:
+            etf_symbol_map = fetch_etf_flags_cached(etf_tickers)
+            etf_mask |= latest_all["YF_Symbol"].map(etf_symbol_map).fillna(False)
         latest_all.loc[etf_mask, "섹터"] = "ETF"
         latest_all["Is_ETF"] = etf_mask
 
