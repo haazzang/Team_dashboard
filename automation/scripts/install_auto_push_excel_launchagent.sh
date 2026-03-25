@@ -11,6 +11,7 @@ TARGET_PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 
 mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs" "${APP_SUPPORT_DIR}"
 install -m 755 "${SOURCE_SCRIPT}" "${INSTALLED_SCRIPT}"
+rm -f "${TARGET_PLIST}"
 cp "${SOURCE_PLIST}" "${TARGET_PLIST}"
 
 launchctl bootout "gui/$(id -u)" "${TARGET_PLIST}" >/dev/null 2>&1 || true

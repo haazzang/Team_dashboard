@@ -38,7 +38,7 @@ log() {
 push_to_master() {
   local commit="$1"
   local commit_subject="$2"
-  local tmp_dir
+  local tmp_dir=""
 
   if [[ "$ENABLE_MASTER_SYNC" != "1" ]]; then
     log "Master sync disabled. Skipping '$MASTER_BRANCH'."
@@ -56,9 +56,13 @@ push_to_master() {
   git -C "$REPO_ROOT" worktree add --detach "$tmp_dir" "$REMOTE/$MASTER_BRANCH"
 
   cleanup() {
+    local target="${tmp_dir:-}"
+    if [[ -z "$target" ]]; then
+      return 0
+    fi
     set +e
-    git -C "$REPO_ROOT" worktree remove --force "$tmp_dir" >/dev/null 2>&1
-    rm -rf "$tmp_dir"
+    git -C "$REPO_ROOT" worktree remove --force "$target" >/dev/null 2>&1
+    rm -rf "$target"
   }
   trap cleanup RETURN
 
