@@ -373,6 +373,42 @@ def fetch_fmp_income_statement(symbol, period="annual", limit=6):
     except Exception:
         return []
 
+@st.cache_data(ttl=3600)
+def fetch_fmp_earnings(symbol, limit=20):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return []
+    try:
+        data = _fmp_request_json("/earnings", {"symbol": fmp_symbol})
+        return data[:limit] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+@st.cache_data(ttl=86400)
+def fetch_fmp_transcript_dates(symbol, limit=12):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return []
+    try:
+        data = _fmp_request_json("/earning-call-transcript-dates", {"symbol": fmp_symbol})
+        return data[:limit] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+@st.cache_data(ttl=86400)
+def fetch_fmp_transcript(symbol, fiscal_year, quarter):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return []
+    try:
+        data = _fmp_request_json(
+            "/earning-call-transcript",
+            {"symbol": fmp_symbol, "year": fiscal_year, "quarter": quarter},
+        )
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
 @st.cache_data(ttl=900)
 def fetch_fmp_company_intel(symbol, news_limit=5, grades_limit=5):
     return {
@@ -382,6 +418,8 @@ def fetch_fmp_company_intel(symbol, news_limit=5, grades_limit=5):
         "ratios": fetch_fmp_ratios_ttm(symbol),
         "analyst_estimates": fetch_fmp_analyst_estimates(symbol, period="annual", limit=10),
         "income_statement": fetch_fmp_income_statement(symbol, period="annual", limit=6),
+        "earnings": fetch_fmp_earnings(symbol, limit=20),
+        "transcript_dates": fetch_fmp_transcript_dates(symbol, limit=12),
         "grades_consensus": fetch_fmp_grades_consensus(symbol),
         "stock_news": fetch_fmp_stock_news(symbol, limit=news_limit),
         "press_releases": fetch_fmp_press_releases(symbol, limit=news_limit),

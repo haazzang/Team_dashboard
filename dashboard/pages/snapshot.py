@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from dashboard.core import *  # noqa: F401,F403
@@ -283,6 +284,208 @@ def _build_multiple_snapshot(profile, quote, key_metrics, ratios, estimates):
 
     df = pd.DataFrame(rows)
     return df[(df["TTM"] != "-") | (df["Forward"] != "-")].reset_index(drop=True)
+
+def _compute_surprise_pct(actual, estimate):
+    act = _coerce_float(actual)
+    est = _coerce_float(estimate)
+    if act is None or est is None or est == 0:
+        return None
+    return act / est - 1
+
+def _surprise_outcome(actual, estimate):
+    act = _coerce_float(actual)
+    est = _coerce_float(estimate)
+    if act is None or est is None:
+        return "N/A"
+    if act > est:
+        return "Beat"
+    if act < est:
+        return "Miss"
+    return "In Line"
+
+def _build_earnings_surprise_history(earnings):
+    if not earnings:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(earnings)
+    if "date" not in df.columns:
+        return pd.DataFrame()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).sort_values("date")
+    df = df[
+        df["epsActual"].notna()
+        | df["revenueActual"].notna()
+        | df["epsEstimated"].notna()
+        | df["revenueEstimated"].notna()
+    ].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["EPS Surprise %"] = df.apply(lambda row: _compute_surprise_pct(row.get("epsActual"), row.get("epsEstimated")), axis=1)
+    df["Revenue Surprise %"] = df.apply(lambda row: _compute_surprise_pct(row.get("revenueActual"), row.get("revenueEstimated")), axis=1)
+    df["EPS Outcome"] = df.apply(lambda row: _surprise_outcome(row.get("epsActual"), row.get("epsEstimated")), axis=1)
+    df["Revenue Outcome"] = df.apply(lambda row: _surprise_outcome(row.get("revenueActual"), row.get("revenueEstimated")), axis=1)
+    df["Report Date"] = df["date"].dt.strftime("%Y-%m-%d")
+    df["EPS Actual"] = df["epsActual"].apply(_format_decimal)
+    df["EPS Estimate"] = df["epsEstimated"].apply(_format_decimal)
+    df["Revenue Actual"] = df["revenueActual"].apply(_format_large_number)
+    df["Revenue Estimate"] = df["revenueEstimated"].apply(_format_large_number)
+    return df.tail(8).reset_index(drop=True)
+
+def _parse_amount_with_unit(number_text, unit_text):
+    if number_text is None:
+        return None
+    try:
+        value = float(str(number_text).replace(",", ""))
+    except ValueError:
+        return None
+
+    unit = str(unit_text or "").strip().lower()
+    if unit in {"t", "trillion"}:
+        return value * 1e12
+    if unit in {"b", "billion"}:
+        return value * 1e9
+    if unit in {"m", "million"}:
+        return value * 1e6
+    return value
+
+def _extract_revenue_guidance(text):
+    if not text:
+        return None
+
+    normalized = " ".join(str(text).split())
+
+    plus_minus_patterns = [
+        r"(?:revenue|sales)[^.]{0,180}?(?:expected to be|to be|will be)\s+\$?\s*([\d.,]+)\s*(trillion|billion|million|t|b|m)?(?:\s*,?\s*plus or minus\s*([\d.]+)\s*%)",
+        r"(?:revenue|sales)[^.]{0,180}?guidance[^.]{0,60}?\$?\s*([\d.,]+)\s*(trillion|billion|million|t|b|m)?(?:\s*,?\s*plus or minus\s*([\d.]+)\s*%)",
+    ]
+    for pattern in plus_minus_patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        center = _parse_amount_with_unit(match.group(1), match.group(2))
+        pct = _coerce_float(match.group(3))
+        if center is None or pct is None:
+            continue
+        low = center * (1 - pct / 100.0)
+        high = center * (1 + pct / 100.0)
+        return {
+            "kind": "plus_minus",
+            "low": low,
+            "high": high,
+            "mid": center,
+            "snippet": match.group(0),
+        }
+
+    range_patterns = [
+        r"(?:revenue|sales)[^.]{0,180}?(?:between|range of|to be between)\s+\$?\s*([\d.,]+)\s*(trillion|billion|million|t|b|m)?\s*(?:and|to|-)\s*\$?\s*([\d.,]+)\s*(trillion|billion|million|t|b|m)?",
+    ]
+    for pattern in range_patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        low = _parse_amount_with_unit(match.group(1), match.group(2))
+        high = _parse_amount_with_unit(match.group(3), match.group(4) or match.group(2))
+        if low is None or high is None:
+            continue
+        low, high = sorted([low, high])
+        return {
+            "kind": "range",
+            "low": low,
+            "high": high,
+            "mid": (low + high) / 2.0,
+            "snippet": match.group(0),
+        }
+
+    point_patterns = [
+        r"(?:revenue|sales)[^.]{0,180}?(?:expected to be|to be|will be)\s+\$?\s*([\d.,]+)\s*(trillion|billion|million|t|b|m)",
+    ]
+    for pattern in point_patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        point = _parse_amount_with_unit(match.group(1), match.group(2))
+        if point is None:
+            continue
+        return {
+            "kind": "point",
+            "low": point,
+            "high": point,
+            "mid": point,
+            "snippet": match.group(0),
+        }
+
+    return None
+
+def _build_guidance_tracking(symbol, transcript_dates, earnings):
+    if not transcript_dates or not earnings:
+        return pd.DataFrame()
+
+    earnings_df = pd.DataFrame(earnings)
+    if "date" not in earnings_df.columns:
+        return pd.DataFrame()
+    earnings_df["date"] = pd.to_datetime(earnings_df["date"], errors="coerce")
+    earnings_df = earnings_df.dropna(subset=["date"]).sort_values("date")
+    if earnings_df.empty:
+        return pd.DataFrame()
+
+    transcript_df = pd.DataFrame(transcript_dates)
+    if "date" not in transcript_df.columns:
+        return pd.DataFrame()
+    transcript_df["date"] = pd.to_datetime(transcript_df["date"], errors="coerce")
+    transcript_df = transcript_df.dropna(subset=["date"]).sort_values("date", ascending=False)
+    if transcript_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in transcript_df.head(8).iterrows():
+        quarter = row.get("quarter")
+        fiscal_year = row.get("fiscalYear") or row.get("year")
+        if quarter is None or fiscal_year is None:
+            continue
+
+        transcript = fetch_fmp_transcript(symbol, int(fiscal_year), int(quarter))
+        transcript_text = transcript[0].get("content") if transcript else None
+        guidance = _extract_revenue_guidance(transcript_text)
+        if not guidance:
+            continue
+
+        next_report = earnings_df[earnings_df["date"] > row["date"]].head(1)
+        target_date = next_report["date"].iloc[0] if not next_report.empty else pd.NaT
+        actual = next_report["revenueActual"].iloc[0] if not next_report.empty else None
+
+        outcome = "Pending"
+        delta_mid = None
+        delta_range = None
+        if _coerce_float(actual) is not None:
+            delta_mid = _compute_surprise_pct(actual, guidance["mid"])
+            if actual > guidance["high"]:
+                outcome = "Beat"
+                delta_range = _compute_surprise_pct(actual, guidance["high"])
+            elif actual < guidance["low"]:
+                outcome = "Miss"
+                delta_range = _compute_surprise_pct(actual, guidance["low"])
+            else:
+                outcome = "In Line"
+                delta_range = 0.0
+
+        rows.append({
+            "Transcript Date": row["date"].strftime("%Y-%m-%d"),
+            "Fiscal Period": f"Q{int(quarter)} FY{int(fiscal_year)}",
+            "Target Report": target_date.strftime("%Y-%m-%d") if pd.notnull(target_date) else "-",
+            "Guidance Low": guidance["low"],
+            "Guidance High": guidance["high"],
+            "Guidance Mid": guidance["mid"],
+            "Guide Range": f"{_format_large_number(guidance['low'])} - {_format_large_number(guidance['high'])}",
+            "Actual Revenue": _format_large_number(actual),
+            "Outcome": outcome,
+            "Delta vs Mid %": delta_mid,
+            "Delta vs Range %": delta_range,
+            "Source Snippet": guidance["snippet"],
+        })
+
+    return pd.DataFrame(rows)
 
 def _render_news_feed(title, items, empty_message):
     st.markdown(f"#### {title}")
@@ -893,6 +1096,8 @@ def render_snapshot_page():
                 ratios = intel.get("ratios") or {}
                 analyst_estimates = intel.get("analyst_estimates") or []
                 income_statement = intel.get("income_statement") or []
+                earnings = intel.get("earnings") or []
+                transcript_dates = intel.get("transcript_dates") or []
                 grades_consensus = intel.get("grades_consensus") or {}
                 grades_news = intel.get("grades_news") or []
                 stock_news = intel.get("stock_news") or []
@@ -966,6 +1171,139 @@ def render_snapshot_page():
                         st.info("표시할 멀티플 데이터가 없습니다.")
                     else:
                         st.dataframe(multiples_df, use_container_width=True, hide_index=True)
+
+                st.markdown("#### Earnings Surprise")
+                surprise_df = _build_earnings_surprise_history(earnings)
+                if surprise_df.empty:
+                    st.info("FMP earnings surprise 데이터가 없습니다.")
+                else:
+                    latest_surprise = surprise_df.iloc[-1]
+                    e1, e2, e3 = st.columns(3)
+                    e1.metric(
+                        "Latest EPS Surprise",
+                        latest_surprise["EPS Outcome"],
+                        delta=f"{latest_surprise['EPS Surprise %']:+.2%}" if pd.notnull(latest_surprise["EPS Surprise %"]) else None,
+                    )
+                    e2.metric(
+                        "Latest Revenue Surprise",
+                        latest_surprise["Revenue Outcome"],
+                        delta=f"{latest_surprise['Revenue Surprise %']:+.2%}" if pd.notnull(latest_surprise["Revenue Surprise %"]) else None,
+                    )
+                    e3.metric("Latest Report", latest_surprise["Report Date"])
+
+                    fig_surprise = go.Figure()
+                    if surprise_df["EPS Surprise %"].notna().any():
+                        fig_surprise.add_trace(go.Bar(
+                            name="EPS Surprise",
+                            x=surprise_df["Report Date"],
+                            y=surprise_df["EPS Surprise %"],
+                            marker_color="#2563eb",
+                        ))
+                    if surprise_df["Revenue Surprise %"].notna().any():
+                        fig_surprise.add_trace(go.Bar(
+                            name="Revenue Surprise",
+                            x=surprise_df["Report Date"],
+                            y=surprise_df["Revenue Surprise %"],
+                            marker_color="#16a34a",
+                        ))
+                    fig_surprise.add_hline(y=0, line_dash="dash", line_color="#64748b")
+                    fig_surprise.update_layout(
+                        barmode="group",
+                        xaxis_title="Report Date",
+                        yaxis_title="Surprise %",
+                        yaxis_tickformat=".1%",
+                        margin=dict(t=10, l=10, r=10, b=10),
+                    )
+                    st.plotly_chart(fig_surprise, use_container_width=True)
+
+                    st.dataframe(
+                        surprise_df[
+                            [
+                                "Report Date",
+                                "EPS Actual",
+                                "EPS Estimate",
+                                "EPS Outcome",
+                                "EPS Surprise %",
+                                "Revenue Actual",
+                                "Revenue Estimate",
+                                "Revenue Outcome",
+                                "Revenue Surprise %",
+                            ]
+                        ].style.format({
+                            "EPS Surprise %": "{:+.2%}",
+                            "Revenue Surprise %": "{:+.2%}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                st.markdown("#### Revenue Guidance Beat / Miss")
+                st.caption("Transcript에서 revenue guidance를 heuristic으로 추출한 결과입니다. transcript coverage가 있는 종목만 표시됩니다.")
+                guidance_df = _build_guidance_tracking(selected_symbol, transcript_dates, earnings)
+                if guidance_df.empty:
+                    st.info("구조화 가능한 revenue guidance가 없거나 transcript coverage가 없습니다.")
+                else:
+                    latest_guidance = guidance_df.iloc[0]
+                    g1, g2, g3 = st.columns(3)
+                    g1.metric("Latest Guidance Outcome", latest_guidance["Outcome"])
+                    g2.metric(
+                        "Delta vs Mid",
+                        f"{latest_guidance['Delta vs Mid %']:+.2%}" if pd.notnull(latest_guidance["Delta vs Mid %"]) else "-",
+                    )
+                    g3.metric("Target Report", latest_guidance["Target Report"])
+
+                    chart_df = guidance_df.copy().iloc[::-1]
+                    fig_guidance = go.Figure(data=go.Bar(
+                        x=chart_df["Target Report"],
+                        y=chart_df["Delta vs Mid %"],
+                        marker_color=[
+                            "#16a34a" if outcome == "Beat" else "#dc2626" if outcome == "Miss" else "#94a3b8"
+                            for outcome in chart_df["Outcome"]
+                        ],
+                        text=[
+                            f"{value:+.2%}" if pd.notnull(value) else "Pending"
+                            for value in chart_df["Delta vs Mid %"]
+                        ],
+                        textposition="auto",
+                    ))
+                    fig_guidance.add_hline(y=0, line_dash="dash", line_color="#64748b")
+                    fig_guidance.update_layout(
+                        xaxis_title="Target Report Date",
+                        yaxis_title="Actual vs Guided Mid",
+                        yaxis_tickformat=".1%",
+                        margin=dict(t=10, l=10, r=10, b=10),
+                    )
+                    st.plotly_chart(fig_guidance, use_container_width=True)
+
+                    st.dataframe(
+                        guidance_df[
+                            [
+                                "Transcript Date",
+                                "Fiscal Period",
+                                "Target Report",
+                                "Guide Range",
+                                "Actual Revenue",
+                                "Outcome",
+                                "Delta vs Mid %",
+                                "Delta vs Range %",
+                            ]
+                        ].style.format({
+                            "Delta vs Mid %": "{:+.2%}",
+                            "Delta vs Range %": "{:+.2%}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    with st.expander("Guidance Extraction Detail", expanded=False):
+                        st.dataframe(
+                            guidance_df[["Transcript Date", "Fiscal Period", "Source Snippet"]],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                st.markdown("#### Earnings Revision")
+                st.info("현재 FMP stable endpoint는 과거 시점별 consensus snapshot을 제공하지 않아 true earnings revision history 차트는 바로 만들 수 없습니다. revision 차트를 원하면 estimate snapshot을 일별로 별도 저장하는 레이어가 추가로 필요합니다.")
 
                 sentiment_col, grades_col = st.columns([1, 1.1])
                 with sentiment_col:
