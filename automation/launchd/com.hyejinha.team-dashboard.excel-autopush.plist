@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/hyejinha/Library/Application Support/TeamDashboard/auto_push_excel.sh</string>
+        <string>/Users/hyejinha/.local/bin/team-dashboard-auto-push-excel.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -22,13 +22,17 @@
         <string>/Users/hyejinha</string>
         <key>REPO_ROOT</key>
         <string>/Users/hyejinha/Desktop/Workspace/Team</string>
+        <key>RUN_ONCE</key>
+        <string>1</string>
     </dict>
 
     <key>RunAtLoad</key>
     <true/>
 
-    <key>KeepAlive</key>
-    <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/hyejinha/Desktop/Workspace/Team/2026_멀티.xlsx</string>
+    </array>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>
