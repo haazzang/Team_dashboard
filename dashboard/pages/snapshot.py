@@ -39,6 +39,151 @@ def _watch_snapshot_file(data_path):
         status_parts.append(f"마지막 반영 {last_refreshed}")
     st.caption(" | ".join(status_parts))
 
+def _first_present(*values):
+    for value in values:
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except Exception:
+            pass
+        text = str(value).strip()
+        if text and text.upper() not in {"NAN", "NONE"}:
+            return value
+    return None
+
+def _coerce_float(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def _format_large_number(value):
+    number = _coerce_float(value)
+    if number is None:
+        return "-"
+    abs_value = abs(number)
+    for divisor, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs_value >= divisor:
+            return f"{number / divisor:.2f}{suffix}"
+    return f"{number:,.2f}" if abs_value < 100 else f"{number:,.0f}"
+
+def _format_price(value, currency=None):
+    number = _coerce_float(value)
+    if number is None:
+        return "-"
+    suffix = f" {currency}" if currency else ""
+    if abs(number) >= 1000:
+        return f"{number:,.0f}{suffix}"
+    return f"{number:,.2f}{suffix}"
+
+def _format_percent(value):
+    number = _coerce_float(value)
+    if number is None:
+        return "-"
+    return f"{number:.2%}"
+
+def _format_multiple(value):
+    number = _coerce_float(value)
+    if number is None:
+        return "-"
+    return f"{number:.2f}x"
+
+def _format_decimal(value):
+    number = _coerce_float(value)
+    if number is None:
+        return "-"
+    return f"{number:.2f}"
+
+def _format_timestamp(value):
+    if value is None:
+        return "-"
+    raw = str(value).strip()
+    if not raw:
+        return "-"
+    parsed = pd.to_datetime(raw, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        parsed = pd.to_datetime(raw, errors="coerce")
+    if pd.isna(parsed):
+        return raw
+    try:
+        if parsed.tzinfo is not None:
+            parsed = parsed.tz_convert("Asia/Seoul").tz_localize(None)
+    except Exception:
+        pass
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+def _sentiment_label(score):
+    value = _coerce_float(score)
+    if value is None:
+        return "No Coverage"
+    if value >= 0.5:
+        return "Strong Buy"
+    if value >= 0.15:
+        return "Buy"
+    if value > -0.15:
+        return "Hold"
+    if value > -0.5:
+        return "Sell"
+    return "Strong Sell"
+
+def _build_fundamental_snapshot(profile, quote, key_metrics, ratios):
+    rows = [
+        ("Latest Price", _format_price(_first_present(quote.get("price"), profile.get("price")), _first_present(profile.get("currency"), quote.get("currency")))),
+        ("Market Cap", _format_large_number(_first_present(profile.get("marketCap"), quote.get("marketCap"), key_metrics.get("marketCap")))),
+        ("Beta", _format_decimal(profile.get("beta"))),
+        ("P/E (TTM)", _format_multiple(ratios.get("priceToEarningsRatioTTM"))),
+        ("P/B (TTM)", _format_multiple(ratios.get("priceToBookRatioTTM"))),
+        ("EV / Sales (TTM)", _format_multiple(key_metrics.get("evToSalesTTM"))),
+        ("EV / EBITDA (TTM)", _format_multiple(key_metrics.get("evToEBITDATTM"))),
+        ("ROE (TTM)", _format_percent(key_metrics.get("returnOnEquityTTM"))),
+        ("ROIC (TTM)", _format_percent(key_metrics.get("returnOnInvestedCapitalTTM"))),
+        ("Gross Margin (TTM)", _format_percent(ratios.get("grossProfitMarginTTM"))),
+        ("Operating Margin (TTM)", _format_percent(ratios.get("operatingProfitMarginTTM"))),
+        ("Net Margin (TTM)", _format_percent(ratios.get("netProfitMarginTTM"))),
+        ("Current Ratio (TTM)", _format_decimal(_first_present(ratios.get("currentRatioTTM"), key_metrics.get("currentRatioTTM")))),
+        ("Debt / Equity (TTM)", _format_decimal(ratios.get("debtToEquityRatioTTM"))),
+        ("FCF Yield (TTM)", _format_percent(key_metrics.get("freeCashFlowYieldTTM"))),
+    ]
+    return pd.DataFrame([{"Metric": label, "Value": value} for label, value in rows if value != "-"])
+
+def _render_news_feed(title, items, empty_message):
+    st.markdown(f"#### {title}")
+    if not items:
+        st.info(empty_message)
+        return
+
+    for idx, item in enumerate(items):
+        headline = item.get("title") or item.get("newsTitle") or "Untitled"
+        url = item.get("url") or item.get("newsURL")
+        publisher = item.get("publisher") or item.get("newsPublisher") or item.get("site") or item.get("newsBaseURL")
+        meta = " | ".join(
+            part for part in [
+                _format_timestamp(item.get("publishedDate")),
+                str(publisher).strip() if publisher else None,
+            ] if part
+        )
+
+        if url:
+            st.markdown(f"**[{headline}]({url})**")
+        else:
+            st.markdown(f"**{headline}**")
+        if meta:
+            st.caption(meta)
+
+        summary = item.get("text")
+        if summary:
+            text = str(summary).strip()
+            if len(text) > 320:
+                text = text[:317].rstrip() + "..."
+            st.write(text)
+
+        if idx < len(items) - 1:
+            st.divider()
+
 def render_snapshot_page():
     st.subheader("📌 Portfolio Snapshot (2026_멀티.xlsx)")
     script_dir = ROOT_DIR
@@ -208,10 +353,11 @@ def render_snapshot_page():
         # 시뮬레이션용 holdings 데이터 준비
         holdings["YF_Symbol"] = holdings["Group_ID"]
 
-        # 탭 생성: 현황 / 전일 등락률 / 시뮬레이션
-        tab_snapshot, tab_heatmap, tab_simulation = st.tabs([
+        # 탭 생성: 현황 / 전일 등락률 / 종목별 인텔 / 시뮬레이션
+        tab_snapshot, tab_heatmap, tab_intel, tab_simulation = st.tabs([
             "📊 포트폴리오 현황",
             "🟩 전일 등락률 Heatmap",
+            "🧠 종목별 FMP Intel",
             "🔬 포트폴리오 시뮬레이션",
         ])
 
@@ -576,6 +722,163 @@ def render_snapshot_page():
                         "직전거래일": lambda x: x.strftime("%Y-%m-%d") if pd.notnull(x) else "-",
                     })
                 )
+
+        with tab_intel:
+            st.markdown("### 🧠 포트폴리오 종목별 FMP Intel")
+            st.caption("기존 포트폴리오 로직은 유지하고, 선택한 보유 종목의 FMP fundamentals, news, analyst sentiment를 추가로 표시합니다.")
+
+            intel_holdings = (
+                holdings[holdings["YF_Symbol"].notna()]
+                .sort_values("Weight", ascending=False)
+                .drop_duplicates(subset=["YF_Symbol"])
+                .reset_index(drop=True)
+            )
+
+            if intel_holdings.empty:
+                st.warning("FMP 인텔리전스를 조회할 보유 종목이 없습니다.")
+            else:
+                options = intel_holdings["YF_Symbol"].tolist()
+                option_labels = {
+                    row["YF_Symbol"]: f"{row['종목명']} ({row['YF_Symbol']}) | 비중 {row['Weight']:.2%} | 섹터 {row['섹터']}"
+                    for _, row in intel_holdings.iterrows()
+                }
+                selected_symbol = st.selectbox(
+                    "보유 종목 선택",
+                    options=options,
+                    format_func=lambda symbol: option_labels.get(symbol, symbol),
+                    key="snapshot_fmp_intel_symbol",
+                )
+                selected_row = intel_holdings.loc[intel_holdings["YF_Symbol"] == selected_symbol].iloc[0]
+
+                with st.spinner(f"{selected_symbol} FMP 데이터 로드 중..."):
+                    intel = fetch_fmp_company_intel(selected_symbol, news_limit=6, grades_limit=8)
+
+                profile = intel.get("profile") or {}
+                quote = intel.get("quote") or {}
+                key_metrics = intel.get("key_metrics") or {}
+                ratios = intel.get("ratios") or {}
+                grades_consensus = intel.get("grades_consensus") or {}
+                grades_news = intel.get("grades_news") or []
+                stock_news = intel.get("stock_news") or []
+                press_releases = intel.get("press_releases") or []
+                sentiment = calculate_analyst_sentiment(grades_consensus)
+
+                company_name = _first_present(profile.get("companyName"), selected_row.get("종목명"), selected_symbol)
+                display_currency = _first_present(profile.get("currency"), selected_row.get("통화"), "USD")
+                latest_price = _first_present(quote.get("price"), profile.get("price"))
+                change_pct = _coerce_float(quote.get("changePercentage"))
+                market_cap = _first_present(profile.get("marketCap"), quote.get("marketCap"), key_metrics.get("marketCap"))
+                sentiment_score = sentiment.get("score") if sentiment else None
+                consensus_label = str(
+                    _first_present(grades_consensus.get("consensus"), _sentiment_label(sentiment_score), "N/A")
+                ).title()
+
+                st.markdown(f"#### {company_name} ({selected_symbol})")
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("보유 비중", f"{selected_row['Weight']:.2%}")
+                m2.metric(
+                    "현지 가격",
+                    _format_price(latest_price, display_currency),
+                    delta=f"{change_pct:+.2f}%" if change_pct is not None else None,
+                )
+                m3.metric("시가총액", _format_large_number(market_cap))
+                m4.metric(
+                    "Analyst Consensus",
+                    consensus_label,
+                    delta=f"{sentiment_score:+.2f}" if sentiment_score is not None else None,
+                )
+
+                overview_col, fundamentals_col = st.columns([1, 1.15])
+                with overview_col:
+                    st.markdown("#### Company Overview")
+                    overview_rows = [
+                        ("Ticker", selected_symbol),
+                        ("회사명", company_name),
+                        ("거래소", _first_present(profile.get("exchangeFullName"), profile.get("exchange"), "-")),
+                        ("통화", display_currency),
+                        ("국가", _first_present(profile.get("country"), "-")),
+                        ("섹터", _first_present(profile.get("sector"), selected_row.get("섹터"), "-")),
+                        ("산업", _first_present(profile.get("industry"), "-")),
+                        ("ISIN", _first_present(profile.get("isin"), "-")),
+                    ]
+                    overview_df = pd.DataFrame(overview_rows, columns=["Item", "Value"])
+                    st.dataframe(overview_df, use_container_width=True, hide_index=True)
+
+                    website = profile.get("website")
+                    if website:
+                        st.markdown(f"[Company Website]({website})")
+
+                    description = profile.get("description")
+                    if description:
+                        with st.expander("회사 설명", expanded=False):
+                            st.write(str(description).strip())
+
+                with fundamentals_col:
+                    st.markdown("#### Fundamental Snapshot")
+                    fundamentals_df = _build_fundamental_snapshot(profile, quote, key_metrics, ratios)
+                    if fundamentals_df.empty:
+                        st.info("FMP fundamentals 데이터가 부족합니다.")
+                    else:
+                        st.dataframe(fundamentals_df, use_container_width=True, hide_index=True)
+
+                sentiment_col, grades_col = st.columns([1, 1.1])
+                with sentiment_col:
+                    st.markdown("#### Analyst Sentiment")
+                    if sentiment:
+                        progress_value = min(max((sentiment["score"] + 1) / 2, 0.0), 1.0)
+                        st.progress(progress_value, text=f"Sentiment score {sentiment['score']:+.2f}")
+
+                        counts = sentiment["counts"]
+                        counts_df = pd.DataFrame({
+                            "Rating": ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"],
+                            "Count": [
+                                counts.get("strongBuy", 0),
+                                counts.get("buy", 0),
+                                counts.get("hold", 0),
+                                counts.get("sell", 0),
+                                counts.get("strongSell", 0),
+                            ],
+                        })
+                        fig_sentiment = go.Figure(data=go.Bar(
+                            x=counts_df["Rating"],
+                            y=counts_df["Count"],
+                            text=counts_df["Count"],
+                            textposition="auto",
+                            marker_color=["#166534", "#16a34a", "#94a3b8", "#f97316", "#dc2626"],
+                        ))
+                        fig_sentiment.update_layout(
+                            xaxis_title="",
+                            yaxis_title="Count",
+                            margin=dict(t=10, l=10, r=10, b=10),
+                        )
+                        st.plotly_chart(fig_sentiment, use_container_width=True)
+                    else:
+                        st.info("Analyst consensus 데이터가 없습니다.")
+
+                with grades_col:
+                    st.markdown("#### Recent Rating Changes")
+                    if grades_news:
+                        grades_df = pd.DataFrame([
+                            {
+                                "Published": _format_timestamp(item.get("publishedDate")),
+                                "Analyst": item.get("gradingCompany"),
+                                "Action": str(item.get("action") or "-").title(),
+                                "New Grade": item.get("newGrade") or "-",
+                                "Prev Grade": item.get("previousGrade") or "-",
+                                "Price": _format_price(item.get("priceWhenPosted"), display_currency),
+                            }
+                            for item in grades_news
+                        ])
+                        st.dataframe(grades_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("최근 등급 변경 뉴스가 없습니다.")
+
+                news_col, press_col = st.columns(2)
+                with news_col:
+                    _render_news_feed("Latest Stock News", stock_news, "선택한 종목에 대한 일반 뉴스가 없습니다.")
+                with press_col:
+                    _render_news_feed("Press Releases", press_releases, "선택한 종목에 대한 보도자료가 없습니다.")
 
         with tab_simulation:
             st.markdown("### 🔬 포트폴리오 비중 시뮬레이션")

@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import yfinance as yf
 import requests
 from scipy import stats
 import json
 import os
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import base64
 from datetime import datetime, timezone
@@ -85,6 +85,18 @@ SECTOR_FALLBACKS = {
     "XLP": "ETF",
 }
 
+DEFAULT_FMP_API_KEY = "JI9NAp3lfVUybz10CbT3cPr8uQjLiowG"
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
+FMP_REQUEST_TIMEOUT = 20
+FMP_MAX_WORKERS = 8
+FMP_SYMBOL_OVERRIDES = {
+    "KRW=X": "USDKRW",
+    "JPY=X": "USDJPY",
+    "HKD=X": "USDHKD",
+    "GC=F": "GCUSD",
+    "CL=F": "CLUSD",
+}
+
 # --- Page Config ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
 st.title("Team Portfolio Analysis Dashboard")
@@ -157,6 +169,45 @@ def infer_sector_fallback(*candidates):
             return SECTOR_FALLBACKS[key]
     return None
 
+def get_fmp_api_key():
+    env_key = os.getenv("FMP_API_KEY")
+    if env_key:
+        return env_key.strip()
+    if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
+        return str(st.secrets["FMP_API_KEY"]).strip()
+    return DEFAULT_FMP_API_KEY
+
+def to_fmp_symbol(symbol):
+    sym = _clean_symbol(symbol)
+    if not sym:
+        return None
+    return FMP_SYMBOL_OVERRIDES.get(sym, sym)
+
+def _fmp_headers():
+    return {"User-Agent": "TeamDashboard/1.0"}
+
+def _fmp_request_json(path, params=None, timeout=FMP_REQUEST_TIMEOUT):
+    query = dict(params or {})
+    api_key = get_fmp_api_key()
+    if api_key:
+        query["apikey"] = api_key
+    resp = requests.get(f"{FMP_BASE_URL}{path}", params=query, headers=_fmp_headers(), timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and "Error Message" in data:
+        return []
+    return data
+
+def _coerce_first_item(data):
+    if isinstance(data, list):
+        return data[0] if data else {}
+    return data if isinstance(data, dict) else {}
+
+def _normalize_date_value(value):
+    if pd.isna(value):
+        return None
+    return pd.Timestamp(value).normalize()
+
 def is_etf_value(value):
     if value is None:
         return False
@@ -174,44 +225,157 @@ def is_etf_product_type(value):
         return True
     return is_etf_value(text)
 
-def is_etf_from_info(info):
-    if not isinstance(info, dict):
+def is_etf_from_profile(profile):
+    if not isinstance(profile, dict):
         return False
 
-    quote_type = str(info.get("quoteType", "")).strip().upper()
-    if quote_type in ("ETF", "ETN"):
+    if bool(profile.get("isEtf")) or bool(profile.get("isFund")):
         return True
 
-    if is_etf_value(info.get("sector")):
-        return True
-
-    for key in ("longName", "shortName", "fundFamily", "category"):
-        if is_etf_value(info.get(key)):
+    for key in ("sector", "industry", "companyName", "description"):
+        if is_etf_value(profile.get(key)):
             return True
     return False
+
+@st.cache_data(ttl=3600)
+def fetch_fmp_quote(symbol):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return {}
+    try:
+        return _coerce_first_item(_fmp_request_json("/quote", {"symbol": fmp_symbol}))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=1800)
+def fetch_fmp_recent_close(symbol, lookback_days=10):
+    quote = fetch_fmp_quote(symbol)
+    for key in ("price", "previousClose", "open"):
+        try:
+            value = quote.get(key)
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.Timedelta(days=lookback_days)
+    series = _fetch_fmp_eod_series(symbol, start_date, end_date)
+    if series.empty:
+        return None
+    try:
+        return float(series.iloc[-1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+@st.cache_data(ttl=3600)
+def fetch_fmp_profile(symbol):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return {}
+    try:
+        return _coerce_first_item(_fmp_request_json("/profile", {"symbol": fmp_symbol}))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=3600)
+def fetch_fmp_key_metrics_ttm(symbol):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return {}
+    try:
+        return _coerce_first_item(_fmp_request_json("/key-metrics-ttm", {"symbol": fmp_symbol}))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=3600)
+def fetch_fmp_ratios_ttm(symbol):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return {}
+    try:
+        return _coerce_first_item(_fmp_request_json("/ratios-ttm", {"symbol": fmp_symbol}))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=900)
+def fetch_fmp_stock_news(symbol, limit=5):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return []
+    try:
+        data = _fmp_request_json("/news/stock", {"symbols": fmp_symbol, "page": 0, "limit": limit})
+        if not isinstance(data, list):
+            return []
+        return [row for row in data if str(row.get("symbol", "")).strip().upper() == fmp_symbol.upper()][:limit]
+    except Exception:
+        return []
+
+@st.cache_data(ttl=900)
+def fetch_fmp_press_releases(symbol, limit=5):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return []
+    try:
+        data = _fmp_request_json("/news/press-releases", {"symbols": fmp_symbol, "page": 0, "limit": limit})
+        if not isinstance(data, list):
+            return []
+        return [row for row in data if str(row.get("symbol", "")).strip().upper() == fmp_symbol.upper()][:limit]
+    except Exception:
+        return []
+
+@st.cache_data(ttl=900)
+def fetch_fmp_grades_consensus(symbol):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return {}
+    try:
+        return _coerce_first_item(_fmp_request_json("/grades-consensus", {"symbol": fmp_symbol}))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=900)
+def fetch_fmp_grades_news(symbol, limit=5):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return []
+    try:
+        data = _fmp_request_json("/grades-news", {"symbol": fmp_symbol, "page": 0, "limit": limit})
+        return data[:limit] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+@st.cache_data(ttl=900)
+def fetch_fmp_company_intel(symbol, news_limit=5, grades_limit=5):
+    return {
+        "profile": fetch_fmp_profile(symbol),
+        "quote": fetch_fmp_quote(symbol),
+        "key_metrics": fetch_fmp_key_metrics_ttm(symbol),
+        "ratios": fetch_fmp_ratios_ttm(symbol),
+        "grades_consensus": fetch_fmp_grades_consensus(symbol),
+        "stock_news": fetch_fmp_stock_news(symbol, limit=news_limit),
+        "press_releases": fetch_fmp_press_releases(symbol, limit=news_limit),
+        "grades_news": fetch_fmp_grades_news(symbol, limit=grades_limit),
+    }
 
 @st.cache_data(ttl=3600)
 def fetch_sectors_cached(tickers):
     sector_map = {}
     for t in tickers:
         fallback_sector = infer_sector_fallback(t)
-        try:
-            t_str = str(t).strip()
-            if t_str:
-                info = yf.Ticker(t_str).info
-                if is_etf_from_info(info):
-                    sector_map[t] = "ETF"
-                else:
-                    sector = info.get("sector")
-                    sector_map[t] = (
-                        str(sector).strip()
-                        if sector is not None and str(sector).strip()
-                        else (fallback_sector or "Unknown")
-                    )
+        profile = fetch_fmp_profile(t)
+        if profile:
+            if is_etf_from_profile(profile):
+                sector_map[t] = "ETF"
             else:
-                sector_map[t] = fallback_sector or 'Unknown'
-        except:
-            sector_map[t] = fallback_sector or 'Unknown'
+                sector = profile.get("sector")
+                sector_map[t] = (
+                    str(sector).strip()
+                    if sector is not None and str(sector).strip()
+                    else (fallback_sector or "Unknown")
+                )
+        else:
+            sector_map[t] = fallback_sector or "Unknown"
     return sector_map
 
 @st.cache_data(ttl=3600)
@@ -219,16 +383,63 @@ def fetch_etf_flags_cached(tickers):
     etf_map = {}
     for t in tickers:
         fallback_sector = infer_sector_fallback(t)
-        try:
-            t_str = str(t).strip()
-            if not t_str:
-                etf_map[t] = fallback_sector == "ETF"
-                continue
-            info = yf.Ticker(t_str).info
-            etf_map[t] = is_etf_from_info(info) or fallback_sector == "ETF"
-        except:
-            etf_map[t] = fallback_sector == "ETF"
+        profile = fetch_fmp_profile(t)
+        etf_map[t] = is_etf_from_profile(profile) if profile else False
+        if not etf_map[t] and fallback_sector == "ETF":
+            etf_map[t] = True
     return etf_map
+
+def calculate_analyst_sentiment(grades_consensus):
+    if not isinstance(grades_consensus, dict) or not grades_consensus:
+        return None
+
+    counts = {
+        "strongBuy": int(grades_consensus.get("strongBuy", 0) or 0),
+        "buy": int(grades_consensus.get("buy", 0) or 0),
+        "hold": int(grades_consensus.get("hold", 0) or 0),
+        "sell": int(grades_consensus.get("sell", 0) or 0),
+        "strongSell": int(grades_consensus.get("strongSell", 0) or 0),
+    }
+    total = sum(counts.values())
+    if total == 0:
+        return None
+
+    weighted = (
+        counts["strongBuy"] * 2
+        + counts["buy"]
+        - counts["sell"]
+        - counts["strongSell"] * 2
+    )
+    return {
+        "score": weighted / (2 * total),
+        "total": total,
+        "consensus": grades_consensus.get("consensus"),
+        "counts": counts,
+    }
+
+def is_etf_from_info(info):
+    return is_etf_from_profile(info)
+
+def infer_ticker_currency(ticker, profile=None):
+    symbol = _clean_symbol(ticker)
+    if not symbol:
+        return "USD"
+
+    if symbol.endswith(".T"):
+        return "JPY"
+    if symbol.endswith(".HK"):
+        return "HKD"
+    if symbol.endswith(".KS") or symbol.endswith(".KQ"):
+        return "KRW"
+
+    if isinstance(profile, dict):
+        currency = profile.get("currency")
+        if currency:
+            text = str(currency).strip().upper()
+            if text and text not in ("NAN", "NONE", "N/A"):
+                return text
+
+    return "USD"
 
 def _normalize_sp500_symbol(symbol):
     sym = _clean_symbol(symbol)
@@ -433,78 +644,104 @@ def load_portfolio_snapshot(file_path, file_signature):
     except Exception as e:
         return None, str(e)
 
+def _fetch_fmp_eod_series(symbol, start_date, end_date):
+    fmp_symbol = to_fmp_symbol(symbol)
+    if not fmp_symbol:
+        return pd.Series(dtype=float, name=symbol)
+
+    params = {
+        "symbol": fmp_symbol,
+        "from": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+        "to": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
+    }
+
+    try:
+        data = _fmp_request_json("/historical-price-eod/full", params)
+    except Exception:
+        return pd.Series(dtype=float, name=symbol)
+
+    if not isinstance(data, list) or not data:
+        return pd.Series(dtype=float, name=symbol)
+
+    df = pd.DataFrame(data)
+    if "date" not in df.columns:
+        return pd.Series(dtype=float, name=symbol)
+
+    price_col = "adjustedClose" if "adjustedClose" in df.columns else "close"
+    if price_col not in df.columns:
+        return pd.Series(dtype=float, name=symbol)
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+    df = df.dropna(subset=["date", price_col]).sort_values("date")
+    if df.empty:
+        return pd.Series(dtype=float, name=symbol)
+
+    series = df.set_index("date")[price_col]
+    series = series[~series.index.duplicated(keep="last")]
+    series.name = symbol
+    return series
+
+@st.cache_data
+def download_price_history(tickers, start_date, end_date):
+    clean_tickers = list(dict.fromkeys([str(t).strip() for t in tickers if t and str(t).strip()]))
+    start_dt = _normalize_date_value(start_date)
+    end_dt = _normalize_date_value(end_date)
+    if not clean_tickers or start_dt is None or end_dt is None:
+        return pd.DataFrame()
+
+    buffered_end = end_dt + pd.Timedelta(days=5)
+    series_map = {}
+
+    with ThreadPoolExecutor(max_workers=min(FMP_MAX_WORKERS, len(clean_tickers))) as executor:
+        future_map = {
+            executor.submit(_fetch_fmp_eod_series, ticker, start_dt, buffered_end): ticker
+            for ticker in clean_tickers
+        }
+        for future in as_completed(future_map):
+            ticker = future_map[future]
+            try:
+                series = future.result()
+            except Exception:
+                series = pd.Series(dtype=float, name=ticker)
+            if not series.empty:
+                series_map[ticker] = series
+
+    if not series_map:
+        return pd.DataFrame()
+
+    df = pd.concat(series_map.values(), axis=1).sort_index()
+    df = df.reindex(columns=[ticker for ticker in clean_tickers if ticker in df.columns])
+    return df.ffill()
+
 @st.cache_data
 def download_benchmarks_all(start_date, end_date):
     """Download benchmarks for US, KR, HK, JP"""
     tickers = {'US': '^GSPC', 'KR': '^KS11', 'HK': '^HSI', 'JP': '^N225'}
-    try:
-        data = yf.download(list(tickers.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns: df = data['Adj Close']
-        elif 'Close' in data.columns: df = data['Close']
-        else: df = data
-        
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
-        # [FIX] Remove Timezone
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-            
-        inv_map = {v: k for k, v in tickers.items()}
-        df.rename(columns=inv_map, inplace=True)
-        return df.ffill().pct_change().fillna(0)
-    except:
+    df = download_price_history(list(tickers.values()), start_date, end_date)
+    if df.empty:
         return pd.DataFrame()
+    df = df.rename(columns={v: k for k, v in tickers.items()})
+    return df.ffill().pct_change().fillna(0)
 
 @st.cache_data
 def download_replication_benchmarks(start_date, end_date):
     """Download benchmarks for replication analysis (SPX, NDX)"""
     tickers = {'SPX': '^GSPC', 'NDX': '^NDX'}
-    try:
-        data = yf.download(list(tickers.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns:
-            df = data['Adj Close']
-        elif 'Close' in data.columns:
-            df = data['Close']
-        else:
-            df = data
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # [FIX] Remove Timezone
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-
-        inv_map = {v: k for k, v in tickers.items()}
-        df.rename(columns=inv_map, inplace=True)
-        return df.ffill().pct_change().fillna(0)
-    except:
+    df = download_price_history(list(tickers.values()), start_date, end_date)
+    if df.empty:
         return pd.DataFrame()
+    df = df.rename(columns={v: k for k, v in tickers.items()})
+    return df.ffill().pct_change().fillna(0)
 
 @st.cache_data
 def download_usdkrw(start_date, end_date):
     """Download USD/KRW Exchange Rate"""
-    try:
-        fx = yf.download('KRW=X', start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in fx.columns: fx = fx['Adj Close']
-        elif 'Close' in fx.columns: fx = fx['Close']
-        
-        if isinstance(fx.columns, pd.MultiIndex): fx.columns = fx.columns.get_level_values(0)
-        
-        # [FIX] Remove Timezone
-        if isinstance(fx.index, pd.DatetimeIndex) and fx.index.tz is not None:
-            fx.index = fx.index.tz_localize(None)
-        
-        if isinstance(fx, pd.Series): 
-            fx = fx.to_frame(name='USD_KRW')
-        else: 
-            fx.rename(columns={'KRW=X': 'USD_KRW'}, inplace=True)
-            if 'USD_KRW' not in fx.columns and not fx.empty:
-                 fx.columns = ['USD_KRW']
-        
-        return fx.ffill()
-    except:
+    fx = download_price_history(["KRW=X"], start_date, end_date)
+    if fx.empty:
         return pd.DataFrame()
+    fx = fx.rename(columns={"KRW=X": "USD_KRW"})
+    return fx.ffill()
 
 @st.cache_data
 def download_cross_assets(start_date, end_date):
@@ -512,21 +749,10 @@ def download_cross_assets(start_date, end_date):
         'S&P 500': '^GSPC', 'Nasdaq': '^IXIC', 'KOSPI': '^KS11', 
         'USD/KRW': 'KRW=X', 'US 10Y Yield': '^TNX', 'Gold': 'GC=F', 'Crude Oil': 'CL=F'
     }
-    try:
-        data = yf.download(list(assets.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns: df = data['Adj Close']
-        elif 'Close' in data.columns: df = data['Close']
-        else: df = data
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
-        # [FIX] Remove Timezone
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-
-        df.rename(columns={v: k for k, v in assets.items()}, inplace=True)
-        return df # Returns Prices
-    except:
+    df = download_price_history(list(assets.values()), start_date, end_date)
+    if df.empty:
         return pd.DataFrame()
+    return df.rename(columns={v: k for k, v in assets.items()})
 
 FACTOR_TARGET_COUNT = 15
 
@@ -539,82 +765,38 @@ def download_factors(start_date, end_date, return_prices=False):
         'Bond': 'TLT', 'USD': 'UUP', 'Gold': 'GLD', 'Oil': 'USO',
         'High Beta': 'SPHB', 'Meme': 'MEME', 'Spec Tech': 'ARKK'
     }
-    try:
-        if pd.isna(start_date) or pd.isna(end_date):
-            return pd.DataFrame()
-        data = yf.download(list(factors.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns: df = data['Adj Close']
-        elif 'Close' in data.columns: df = data['Close']
-        else: df = data
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
-        # [FIX] Remove Timezone
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-
-        inv_map = {v: k for k, v in factors.items()}
-        df.rename(columns=inv_map, inplace=True)
-        df = df.ffill()
-        if return_prices:
-            return df
-        return df.pct_change().fillna(0)
-    except:
+    if pd.isna(start_date) or pd.isna(end_date):
         return pd.DataFrame()
+    df = download_price_history(list(factors.values()), start_date, end_date)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.rename(columns={v: k for k, v in factors.items()}).ffill()
+    if return_prices:
+        return df
+    return df.pct_change().fillna(0)
 
 @st.cache_data
 def download_global_indices(start_date, end_date):
     """Download global index prices for report context"""
     indices = {'SPX': '^GSPC', 'Hang Seng': '^HSI', 'Nikkei 225': '^N225', 'ACWI': 'ACWI'}
-    try:
-        data = yf.download(list(indices.values()), start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns: df = data['Adj Close']
-        elif 'Close' in data.columns: df = data['Close']
-        else: df = data
-
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
-        # Align timezone handling with rest of app
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        
-        df.rename(columns={v: k for k, v in indices.items()}, inplace=True)
-        return df.ffill()
-    except:
+    df = download_price_history(list(indices.values()), start_date, end_date)
+    if df.empty:
         return pd.DataFrame()
-
-@st.cache_data
-def download_price_history(tickers, start_date, end_date):
-    tickers = [t for t in tickers if t]
-    if not tickers or pd.isna(start_date) or pd.isna(end_date):
-        return pd.DataFrame()
-    try:
-        data = yf.download(tickers, start=start_date, end=end_date + pd.Timedelta(days=5), progress=False)
-        if 'Adj Close' in data.columns: df = data['Adj Close']
-        elif 'Close' in data.columns: df = data['Close']
-        else: df = data
-        if isinstance(df, pd.Series):
-            df = df.to_frame()
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        return df.ffill()
-    except:
-        return pd.DataFrame()
+    return df.rename(columns={v: k for k, v in indices.items()}).ffill()
 
 @st.cache_data(ttl=3600)
 def fetch_latest_prices(tickers):
-    """전일 종가 기준으로 가격 데이터 가져오기"""
+    """최신 가격 데이터 가져오기"""
     prices = {}
     for t in tickers:
         if not t:
             continue
         try:
-            ticker = yf.Ticker(t)
-            hist = ticker.history(period="5d")
-            if not hist.empty:
-                prices[t] = hist['Close'].iloc[-1]
-        except:
-            pass
+            price = fetch_fmp_recent_close(t)
+            if price is not None:
+                prices[t] = float(price)
+        except (TypeError, ValueError):
+            continue
     return prices
 
 @st.cache_data(ttl=1800)
@@ -1017,10 +1199,22 @@ def get_exchange_rates():
 
     for currency, ticker in fx_tickers.items():
         try:
-            data = yf.Ticker(ticker).history(period="5d")
-            if not data.empty:
-                rates[currency] = data['Close'].iloc[-1]
-        except:
+            rate = fetch_fmp_recent_close(ticker)
+            if rate is not None:
+                rates[currency] = float(rate)
+                continue
+        except Exception:
+            pass
+
+        try:
+            fallback_quote = fetch_fmp_quote(ticker)
+            if fallback_quote.get("price") is not None:
+                rates[currency] = float(fallback_quote["price"])
+                continue
+        except Exception:
+            pass
+
+        try:
             # 기본값 설정
             if currency == "KRW":
                 rates[currency] = 1400.0
@@ -1028,6 +1222,8 @@ def get_exchange_rates():
                 rates[currency] = 150.0
             elif currency == "HKD":
                 rates[currency] = 7.8
+        except Exception:
+            pass
 
     return rates
 
@@ -1060,26 +1256,14 @@ def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holding
     all_tickers = list(set(original_weights.keys()) | set(sim_weights.keys()))
 
     # 각 티커에 대해 최신 종가 가져오기
-    ticker_prices = {}
+    ticker_prices = fetch_latest_prices(tuple(all_tickers))
     ticker_currencies = {}
 
     for ticker in all_tickers:
         try:
-            data = yf.Ticker(ticker).history(period="5d")
-            if not data.empty:
-                ticker_prices[ticker] = data['Close'].iloc[-1]
-
-            # 통화 결정
-            if ticker.endswith(".T"):
-                ticker_currencies[ticker] = "JPY"
-            elif ticker.endswith(".HK"):
-                ticker_currencies[ticker] = "HKD"
-            elif ticker.endswith(".KS") or ticker.endswith(".KQ"):
-                ticker_currencies[ticker] = "KRW"
-            else:
-                ticker_currencies[ticker] = "USD"
-        except:
-            pass
+            ticker_currencies[ticker] = infer_ticker_currency(ticker, fetch_fmp_profile(ticker))
+        except Exception:
+            ticker_currencies[ticker] = infer_ticker_currency(ticker)
 
     # holdings_df에서 통화 정보 업데이트
     if "통화" in holdings_df.columns:
