@@ -133,6 +133,20 @@ def render_snapshot_page():
                 latest_all.loc[unknown_mask, "섹터"] = refilled.fillna(latest_all.loc[unknown_mask, "섹터"])
             latest_all["섹터"] = latest_all["섹터"].replace("", "Unknown").fillna("Unknown")
 
+        unknown_mask = latest_all["섹터"].astype(str).str.strip().str.upper().isin(["", "UNKNOWN", "NAN", "NONE"])
+        if unknown_mask.any():
+            latest_all.loc[unknown_mask, "섹터"] = latest_all.loc[unknown_mask].apply(
+                lambda row: infer_sector_fallback(
+                    row.get("YF_Symbol"),
+                    row.get("Ticker_ID"),
+                    row.get("심볼"),
+                    row.get("종목코드"),
+                    row.get("종목명"),
+                ) or row.get("섹터"),
+                axis=1,
+            )
+            latest_all["섹터"] = latest_all["섹터"].replace("", "Unknown").fillna("Unknown")
+
         etf_mask = pd.Series(False, index=latest_all.index)
         if "상품구분" in latest_all.columns:
             etf_mask |= latest_all["상품구분"].apply(is_etf_product_type)
@@ -175,6 +189,9 @@ def render_snapshot_page():
         total_mv_non_etf = holdings_non_etf["원화평가금액"].sum()
         sector_weights = holdings_non_etf.groupby("섹터")["원화평가금액"].sum().sort_values(ascending=False)
         sector_weights_pct = sector_weights / total_mv_non_etf if total_mv_non_etf else sector_weights * 0
+        sector_weights_display = sector_weights_pct[sector_weights_pct > 0]
+        sector_data_available = not sector_weights_display.empty
+        only_unknown_sector = sector_data_available and set(sector_weights_display.index.astype(str)) == {"Unknown"}
 
         currency_weights = holdings.groupby("통화")["원화평가금액"].sum().sort_values(ascending=False)
         currency_weights_pct = currency_weights / total_mv if total_mv else currency_weights * 0
@@ -298,11 +315,26 @@ def render_snapshot_page():
             st.plotly_chart(fig_hold, use_container_width=True)
 
             st.markdown("#### 🧭 섹터 비중")
-            fig_sector = go.Figure(
-                data=go.Pie(labels=sector_weights_pct.index, values=sector_weights_pct.values, hole=0.45)
-            )
-            fig_sector.update_traces(textinfo="percent+label")
-            st.plotly_chart(fig_sector, use_container_width=True)
+            if sector_data_available:
+                fig_sector = go.Figure(
+                    data=go.Pie(labels=sector_weights_display.index, values=sector_weights_display.values, hole=0.45)
+                )
+                fig_sector.update_traces(textinfo="percent+label")
+                st.plotly_chart(fig_sector, use_container_width=True)
+                if only_unknown_sector:
+                    st.warning("섹터 메타데이터 조회가 실패해 'Unknown'으로만 집계되었습니다.")
+            else:
+                st.warning("섹터 비중을 계산할 수 없습니다. 원본 파일에 섹터 컬럼이 없거나 외부 섹터 조회가 실패했습니다.")
+
+            if sector_data_available:
+                st.dataframe(
+                    pd.DataFrame(
+                        {
+                            "Sector": sector_weights_display.index.astype(str),
+                            "Weight": sector_weights_display.values,
+                        }
+                    ).style.format({"Weight": "{:.2%}"})
+                )
 
             st.markdown("#### 💱 통화 비중")
             fig_fx = go.Figure(
@@ -321,10 +353,10 @@ def render_snapshot_page():
                 sp_sector = fetch_sp500_sector_weights()
             if sp_sector.empty:
                 st.warning("S&P 500 섹터 데이터를 불러오지 못했습니다.")
+            elif not sector_data_available or only_unknown_sector:
+                st.warning("포트폴리오 섹터 메타데이터가 부족해 S&P 500 섹터 비교를 생략합니다.")
             else:
-                port_sector = sector_weights_pct.copy()
-                if "Unknown" in port_sector.index:
-                    port_sector = port_sector.drop("Unknown")
+                port_sector = sector_weights_display.copy()
                 sp_sector = sp_sector.drop("Unknown", errors="ignore")
                 if port_sector.sum() > 0:
                     port_sector = port_sector / port_sector.sum()
