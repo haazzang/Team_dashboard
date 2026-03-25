@@ -163,40 +163,51 @@ def _select_forward_estimate(estimates):
         return {}
     return future_df.iloc[0].to_dict()
 
-def _build_fundamental_snapshot(estimates):
-    if not estimates:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(estimates)
-    if "date" not in df.columns:
-        return pd.DataFrame()
-
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"]).sort_values("date")
-    if df.empty:
-        return pd.DataFrame()
-
-    today = pd.Timestamp.today().normalize()
-    future_df = df[df["date"] >= today]
-    if not future_df.empty:
-        display_df = future_df.head(5)
-    else:
-        display_df = df.sort_values("date", ascending=False).head(5).sort_values("date")
-
+def _build_fundamental_snapshot(estimates, income_statement):
     rows = []
-    for _, row in display_df.iterrows():
-        rows.append({
-            "Fiscal Date": row["date"].strftime("%Y-%m-%d"),
-            "Revenue Avg": _format_large_number(row.get("revenueAvg")),
-            "Revenue Range": _format_range(row.get("revenueLow"), row.get("revenueHigh"), _format_large_number),
-            "EBITDA Avg": _format_large_number(row.get("ebitdaAvg")),
-            "EBIT Avg": _format_large_number(row.get("ebitAvg")),
-            "Net Income Avg": _format_large_number(row.get("netIncomeAvg")),
-            "EPS Avg": _format_decimal(row.get("epsAvg")),
-            "EPS Range": _format_range(row.get("epsLow"), row.get("epsHigh"), _format_decimal),
-            "Rev Analysts": int(_coerce_float(row.get("numAnalystsRevenue")) or 0),
-            "EPS Analysts": int(_coerce_float(row.get("numAnalystsEps")) or 0),
-        })
+
+    if income_statement:
+        actual_df = pd.DataFrame(income_statement)
+        if "date" in actual_df.columns:
+            actual_df["date"] = pd.to_datetime(actual_df["date"], errors="coerce")
+            actual_df = actual_df.dropna(subset=["date"]).sort_values("date")
+            actual_df = actual_df.tail(4)
+            for _, row in actual_df.iterrows():
+                rows.append({
+                    "Type": "Actual",
+                    "Fiscal Date": row["date"].strftime("%Y-%m-%d"),
+                    "Revenue": _format_large_number(row.get("revenue")),
+                    "Revenue Range": "-",
+                    "EBITDA": _format_large_number(row.get("ebitda")),
+                    "EBIT": _format_large_number(_first_present(row.get("ebit"), row.get("operatingIncome"))),
+                    "Net Income": _format_large_number(_first_present(row.get("netIncome"), row.get("bottomLineNetIncome"))),
+                    "EPS": _format_decimal(_first_present(row.get("epsDiluted"), row.get("eps"))),
+                    "EPS Range": "-",
+                    "Rev Analysts": "-",
+                    "EPS Analysts": "-",
+                })
+
+    if estimates:
+        estimate_df = pd.DataFrame(estimates)
+        if "date" in estimate_df.columns:
+            estimate_df["date"] = pd.to_datetime(estimate_df["date"], errors="coerce")
+            estimate_df = estimate_df.dropna(subset=["date"]).sort_values("date")
+            today = pd.Timestamp.today().normalize()
+            estimate_df = estimate_df[estimate_df["date"] >= today].head(4)
+            for _, row in estimate_df.iterrows():
+                rows.append({
+                    "Type": "Estimate",
+                    "Fiscal Date": row["date"].strftime("%Y-%m-%d"),
+                    "Revenue": _format_large_number(row.get("revenueAvg")),
+                    "Revenue Range": _format_range(row.get("revenueLow"), row.get("revenueHigh"), _format_large_number),
+                    "EBITDA": _format_large_number(row.get("ebitdaAvg")),
+                    "EBIT": _format_large_number(row.get("ebitAvg")),
+                    "Net Income": _format_large_number(row.get("netIncomeAvg")),
+                    "EPS": _format_decimal(row.get("epsAvg")),
+                    "EPS Range": _format_range(row.get("epsLow"), row.get("epsHigh"), _format_decimal),
+                    "Rev Analysts": int(_coerce_float(row.get("numAnalystsRevenue")) or 0),
+                    "EPS Analysts": int(_coerce_float(row.get("numAnalystsEps")) or 0),
+                })
 
     return pd.DataFrame(rows)
 
@@ -480,7 +491,7 @@ def render_snapshot_page():
         tab_snapshot, tab_heatmap, tab_intel, tab_simulation = st.tabs([
             "📊 포트폴리오 현황",
             "🟩 전일 등락률 Heatmap",
-            "🧠 종목별 FMP Intel",
+            "🧠 포트폴리오 종목 정보",
             "🔬 포트폴리오 시뮬레이션",
         ])
 
@@ -847,8 +858,8 @@ def render_snapshot_page():
                 )
 
         with tab_intel:
-            st.markdown("### 🧠 포트폴리오 종목별 FMP Intel")
-            st.caption("기존 포트폴리오 로직은 유지하고, 선택한 보유 종목의 FMP fundamentals, news, analyst sentiment를 추가로 표시합니다.")
+            st.markdown("### 🧠 포트폴리오 종목 정보")
+            st.caption("기존 포트폴리오 로직은 유지하고, 선택한 보유 종목의 FMP fundamentals, actuals, news, analyst sentiment를 추가로 표시합니다.")
 
             intel_holdings = (
                 holdings[holdings["YF_Symbol"].notna()]
@@ -881,6 +892,7 @@ def render_snapshot_page():
                 key_metrics = intel.get("key_metrics") or {}
                 ratios = intel.get("ratios") or {}
                 analyst_estimates = intel.get("analyst_estimates") or []
+                income_statement = intel.get("income_statement") or []
                 grades_consensus = intel.get("grades_consensus") or {}
                 grades_news = intel.get("grades_news") or []
                 stock_news = intel.get("stock_news") or []
@@ -940,10 +952,10 @@ def render_snapshot_page():
 
                 with fundamentals_col:
                     st.markdown("#### Fundamental Snapshot")
-                    st.caption(f"FMP analyst estimates 기준, 발행사 보고통화 {display_currency}")
-                    fundamentals_df = _build_fundamental_snapshot(analyst_estimates)
+                    st.caption(f"최근 annual actual과 future analyst estimates 기준, 발행사 보고통화 {display_currency}")
+                    fundamentals_df = _build_fundamental_snapshot(analyst_estimates, income_statement)
                     if fundamentals_df.empty:
-                        st.info("FMP analyst estimates 데이터가 없습니다.")
+                        st.info("FMP actual / analyst estimates 데이터가 없습니다.")
                     else:
                         st.dataframe(fundamentals_df, use_container_width=True, hide_index=True)
 
