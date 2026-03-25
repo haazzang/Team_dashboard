@@ -9,6 +9,7 @@ from scipy import stats
 import json
 import os
 import sqlite3
+import time
 from io import BytesIO
 import base64
 from datetime import datetime, timezone
@@ -36,6 +37,53 @@ try:
     import openai
 except ModuleNotFoundError:
     openai = None  # Streamlit UI still loads; AI report generation will prompt to install
+
+SECTOR_FALLBACKS = {
+    "2359.HK": "Healthcare",
+    "285A.T": "Technology",
+    "3033.HK": "ETF",
+    "3750.HK": "Industrials",
+    "6082.HK": "Technology",
+    "6181.HK": "Consumer Cyclical",
+    "6680.HK": "Basic Materials",
+    "6954.T": "Industrials",
+    "9984.T": "Communication Services",
+    "9988.HK": "Consumer Cyclical",
+    "AAPL": "Technology",
+    "AMZN": "Consumer Cyclical",
+    "AR": "Energy",
+    "BIREN TECH": "Technology",
+    "CAMECO": "Energy",
+    "CATL": "Industrials",
+    "CCJ": "Energy",
+    "CLOUDFLARE": "Technology",
+    "CONTEMPORARY AMPEREX TECHNOLOGY": "Industrials",
+    "CSOP HANG SENG TECH HKD": "ETF",
+    "FANUC": "Industrials",
+    "GLD": "ETF",
+    "GOOG": "Communication Services",
+    "KEYENCE": "Industrials",
+    "KIOXIA": "Technology",
+    "LITE": "Technology",
+    "LYB": "Basic Materials",
+    "MBLY": "Consumer Cyclical",
+    "MOBILEYE": "Consumer Cyclical",
+    "NET": "Technology",
+    "NVDA": "Technology",
+    "NXE": "Energy",
+    "OXY": "Energy",
+    "PLTD": "ETF",
+    "SOFTBANK": "Communication Services",
+    "SPY": "ETF",
+    "TESLA": "Consumer Cyclical",
+    "TME": "Communication Services",
+    "TRACKER FUND OF HONG KONG HKD": "ETF",
+    "TSLA": "Consumer Cyclical",
+    "VST": "Utilities",
+    "VISTRA": "Utilities",
+    "WUXI APPTEC": "Healthcare",
+    "XLP": "ETF",
+}
 
 # --- Page Config ---
 st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
@@ -94,6 +142,21 @@ def normalize_yf_ticker(symbol, currency=None):
         return f"{sym}.T"
     return sym
 
+def _normalize_sector_fallback_key(value):
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in ("", "NAN", "NONE"):
+        return None
+    return " ".join(text.split())
+
+def infer_sector_fallback(*candidates):
+    for candidate in candidates:
+        key = _normalize_sector_fallback_key(candidate)
+        if key and key in SECTOR_FALLBACKS:
+            return SECTOR_FALLBACKS[key]
+    return None
+
 def is_etf_value(value):
     if value is None:
         return False
@@ -131,6 +194,7 @@ def is_etf_from_info(info):
 def fetch_sectors_cached(tickers):
     sector_map = {}
     for t in tickers:
+        fallback_sector = infer_sector_fallback(t)
         try:
             t_str = str(t).strip()
             if t_str:
@@ -139,26 +203,31 @@ def fetch_sectors_cached(tickers):
                     sector_map[t] = "ETF"
                 else:
                     sector = info.get("sector")
-                    sector_map[t] = str(sector).strip() if sector is not None and str(sector).strip() else "Unknown"
+                    sector_map[t] = (
+                        str(sector).strip()
+                        if sector is not None and str(sector).strip()
+                        else (fallback_sector or "Unknown")
+                    )
             else:
-                sector_map[t] = 'Unknown'
+                sector_map[t] = fallback_sector or 'Unknown'
         except:
-            sector_map[t] = 'Unknown'
+            sector_map[t] = fallback_sector or 'Unknown'
     return sector_map
 
 @st.cache_data(ttl=3600)
 def fetch_etf_flags_cached(tickers):
     etf_map = {}
     for t in tickers:
+        fallback_sector = infer_sector_fallback(t)
         try:
             t_str = str(t).strip()
             if not t_str:
-                etf_map[t] = False
+                etf_map[t] = fallback_sector == "ETF"
                 continue
             info = yf.Ticker(t_str).info
-            etf_map[t] = is_etf_from_info(info)
+            etf_map[t] = is_etf_from_info(info) or fallback_sector == "ETF"
         except:
-            etf_map[t] = False
+            etf_map[t] = fallback_sector == "ETF"
     return etf_map
 
 def _normalize_sp500_symbol(symbol):
@@ -282,6 +351,27 @@ def _find_file_by_name(target_name, search_dirs):
                 return f
     return None
 
+def get_file_signature(path):
+    try:
+        stat = Path(path).stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+def _read_excel_with_retries(source, *, sheet_name=0, header=None, engine="openpyxl", retries=4, delay=0.3):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            if hasattr(source, "seek"):
+                source.seek(0)
+            return pd.read_excel(source, sheet_name=sheet_name, header=header, engine=engine)
+        except Exception as exc:
+            last_error = exc
+            if attempt == retries - 1:
+                break
+            time.sleep(delay)
+    raise last_error
+
 def _parse_portfolio_snapshot_df(df_raw):
     try:
         h_idx = -1
@@ -330,15 +420,15 @@ def _parse_portfolio_snapshot_df(df_raw):
 
 def load_portfolio_snapshot_upload(uploaded_file):
     try:
-        df_raw = pd.read_excel(uploaded_file, sheet_name=0, header=None, engine="openpyxl")
+        df_raw = _read_excel_with_retries(uploaded_file, sheet_name=0, header=None, engine="openpyxl")
         return _parse_portfolio_snapshot_df(df_raw)
     except Exception as e:
         return None, str(e)
 
 @st.cache_data
-def load_portfolio_snapshot(file_path, mtime):
+def load_portfolio_snapshot(file_path, file_signature):
     try:
-        df_raw = pd.read_excel(file_path, sheet_name=0, header=None, engine="openpyxl")
+        df_raw = _read_excel_with_retries(file_path, sheet_name=0, header=None, engine="openpyxl")
         return _parse_portfolio_snapshot_df(df_raw)
     except Exception as e:
         return None, str(e)
@@ -1971,5 +2061,3 @@ def load_cash_equity_data(file):
 
     except Exception as e:
         return None, None, None, None, None, None, f"Process Error: {e}"
-
-
