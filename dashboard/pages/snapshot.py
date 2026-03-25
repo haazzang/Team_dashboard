@@ -137,6 +137,32 @@ def _format_range(low, high, formatter):
         return "-"
     return f"{low_text} - {high_text}"
 
+def _safe_divide(numerator, denominator):
+    num = _coerce_float(numerator)
+    den = _coerce_float(denominator)
+    if num is None or den is None or den == 0:
+        return None
+    return num / den
+
+def _select_forward_estimate(estimates):
+    if not estimates:
+        return {}
+
+    df = pd.DataFrame(estimates)
+    if "date" not in df.columns:
+        return {}
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).sort_values("date")
+    if df.empty:
+        return {}
+
+    today = pd.Timestamp.today().normalize()
+    future_df = df[df["date"] >= today]
+    if future_df.empty:
+        return {}
+    return future_df.iloc[0].to_dict()
+
 def _build_fundamental_snapshot(estimates):
     if not estimates:
         return pd.DataFrame()
@@ -173,6 +199,79 @@ def _build_fundamental_snapshot(estimates):
         })
 
     return pd.DataFrame(rows)
+
+def _build_multiple_snapshot(profile, quote, key_metrics, ratios, estimates):
+    latest_price = _first_present(quote.get("price"), profile.get("price"))
+    market_cap = _first_present(profile.get("marketCap"), quote.get("marketCap"), key_metrics.get("marketCap"))
+    enterprise_value = _first_present(
+        key_metrics.get("enterpriseValueTTM"),
+        ratios.get("enterpriseValueTTM"),
+        profile.get("enterpriseValue"),
+    )
+
+    forward_estimate = _select_forward_estimate(estimates)
+    forward_date = forward_estimate.get("date")
+    forward_date_text = (
+        pd.Timestamp(forward_date).strftime("%Y-%m-%d")
+        if forward_date is not None and not pd.isna(forward_date)
+        else "-"
+    )
+
+    forward_pe = _safe_divide(latest_price, forward_estimate.get("epsAvg"))
+    if forward_pe is None:
+        forward_pe = _safe_divide(market_cap, forward_estimate.get("netIncomeAvg"))
+    forward_ps = _safe_divide(market_cap, forward_estimate.get("revenueAvg"))
+    forward_ev_sales = _safe_divide(enterprise_value, forward_estimate.get("revenueAvg"))
+    forward_ev_ebitda = _safe_divide(enterprise_value, forward_estimate.get("ebitdaAvg"))
+    forward_ev_ebit = _safe_divide(enterprise_value, forward_estimate.get("ebitAvg"))
+
+    rows = [
+        {
+            "Metric": "P/E",
+            "TTM": _format_multiple(ratios.get("priceToEarningsRatioTTM")),
+            "Forward": _format_multiple(forward_pe),
+            "Forward Basis": forward_date_text if forward_pe is not None else "-",
+        },
+        {
+            "Metric": "P/Sales",
+            "TTM": _format_multiple(ratios.get("priceToSalesRatioTTM")),
+            "Forward": _format_multiple(forward_ps),
+            "Forward Basis": forward_date_text if forward_ps is not None else "-",
+        },
+        {
+            "Metric": "EV/Sales",
+            "TTM": _format_multiple(key_metrics.get("evToSalesTTM")),
+            "Forward": _format_multiple(forward_ev_sales),
+            "Forward Basis": forward_date_text if forward_ev_sales is not None else "-",
+        },
+        {
+            "Metric": "EV/EBITDA",
+            "TTM": _format_multiple(key_metrics.get("evToEBITDATTM")),
+            "Forward": _format_multiple(forward_ev_ebitda),
+            "Forward Basis": forward_date_text if forward_ev_ebitda is not None else "-",
+        },
+        {
+            "Metric": "EV/EBIT",
+            "TTM": "-",
+            "Forward": _format_multiple(forward_ev_ebit),
+            "Forward Basis": forward_date_text if forward_ev_ebit is not None else "-",
+        },
+        {
+            "Metric": "P/B",
+            "TTM": _format_multiple(ratios.get("priceToBookRatioTTM")),
+            "Forward": "-",
+            "Forward Basis": "-",
+        },
+        {
+            "Metric": "P/FCF",
+            "TTM": _format_multiple(ratios.get("priceToFreeCashFlowRatioTTM")),
+            "Forward": "-",
+            "Forward Basis": "-",
+        },
+    ]
+
+    df = pd.DataFrame(rows)
+    return df[(df["TTM"] != "-") | (df["Forward"] != "-")].reset_index(drop=True)
 
 def _render_news_feed(title, items, empty_message):
     st.markdown(f"#### {title}")
@@ -779,6 +878,8 @@ def render_snapshot_page():
 
                 profile = intel.get("profile") or {}
                 quote = intel.get("quote") or {}
+                key_metrics = intel.get("key_metrics") or {}
+                ratios = intel.get("ratios") or {}
                 analyst_estimates = intel.get("analyst_estimates") or []
                 grades_consensus = intel.get("grades_consensus") or {}
                 grades_news = intel.get("grades_news") or []
@@ -845,6 +946,14 @@ def render_snapshot_page():
                         st.info("FMP analyst estimates 데이터가 없습니다.")
                     else:
                         st.dataframe(fundamentals_df, use_container_width=True, hide_index=True)
+
+                    st.markdown("#### Multiples Snapshot")
+                    st.caption("TTM은 FMP ratio/key metrics, Forward는 가장 가까운 미래 estimate가 있으면 직접 계산합니다.")
+                    multiples_df = _build_multiple_snapshot(profile, quote, key_metrics, ratios, analyst_estimates)
+                    if multiples_df.empty:
+                        st.info("표시할 멀티플 데이터가 없습니다.")
+                    else:
+                        st.dataframe(multiples_df, use_container_width=True, hide_index=True)
 
                 sentiment_col, grades_col = st.columns([1, 1.1])
                 with sentiment_col:

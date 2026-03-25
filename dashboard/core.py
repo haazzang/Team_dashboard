@@ -364,6 +364,8 @@ def fetch_fmp_company_intel(symbol, news_limit=5, grades_limit=5):
     return {
         "profile": fetch_fmp_profile(symbol),
         "quote": fetch_fmp_quote(symbol),
+        "key_metrics": fetch_fmp_key_metrics_ttm(symbol),
+        "ratios": fetch_fmp_ratios_ttm(symbol),
         "analyst_estimates": fetch_fmp_analyst_estimates(symbol, period="annual", limit=10),
         "grades_consensus": fetch_fmp_grades_consensus(symbol),
         "stock_news": fetch_fmp_stock_news(symbol, limit=news_limit),
