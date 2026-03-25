@@ -3,6 +3,41 @@ from pathlib import Path
 from dashboard.core import *  # noqa: F401,F403
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SNAPSHOT_AUTO_REFRESH_SECONDS = 2
+
+def _snapshot_watch_key(data_path):
+    return f"snapshot_watch::{Path(data_path).resolve()}"
+
+@st.fragment(run_every=SNAPSHOT_AUTO_REFRESH_SECONDS)
+def _watch_snapshot_file(data_path):
+    state_key = _snapshot_watch_key(data_path)
+    refreshed_key = f"{state_key}::refreshed_at"
+    signature = get_file_signature(data_path)
+
+    if signature is None:
+        st.caption("원본 파일 감시 중: 파일 정보를 읽을 수 없습니다.")
+        return
+
+    previous_signature = st.session_state.get(state_key)
+    st.session_state[state_key] = signature
+
+    if previous_signature is not None and previous_signature != signature:
+        st.session_state[refreshed_key] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.rerun(scope="app")
+
+    try:
+        modified_at = datetime.fromtimestamp(Path(data_path).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError:
+        modified_at = "확인 불가"
+
+    status_parts = [
+        f"원본 파일 자동 감시 중 ({SNAPSHOT_AUTO_REFRESH_SECONDS}초 간격)",
+        f"최근 수정 {modified_at}",
+    ]
+    last_refreshed = st.session_state.get(refreshed_key)
+    if last_refreshed:
+        status_parts.append(f"마지막 반영 {last_refreshed}")
+    st.caption(" | ".join(status_parts))
 
 def render_snapshot_page():
     st.subheader("📌 Portfolio Snapshot (2026_멀티.xlsx)")
@@ -42,11 +77,15 @@ def render_snapshot_page():
         if uploaded_snapshot is None:
             st.stop()
 
+    if uploaded_snapshot is None and data_path is not None:
+        _watch_snapshot_file(data_path)
+
     with st.spinner("포트폴리오 현황 불러오는 중..."):
         if uploaded_snapshot is not None:
             df_snapshot, err = load_portfolio_snapshot_upload(uploaded_snapshot)
         else:
-            df_snapshot, err = load_portfolio_snapshot(str(data_path), data_path.stat().st_mtime)
+            file_signature = get_file_signature(data_path)
+            df_snapshot, err = load_portfolio_snapshot(str(data_path), file_signature)
 
     if err or df_snapshot is None or df_snapshot.empty:
         st.error(f"데이터 로드 실패: {err}")

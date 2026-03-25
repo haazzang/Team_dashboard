@@ -9,6 +9,7 @@ from scipy import stats
 import json
 import os
 import sqlite3
+import time
 from io import BytesIO
 import base64
 from datetime import datetime, timezone
@@ -282,6 +283,27 @@ def _find_file_by_name(target_name, search_dirs):
                 return f
     return None
 
+def get_file_signature(path):
+    try:
+        stat = Path(path).stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+def _read_excel_with_retries(source, *, sheet_name=0, header=None, engine="openpyxl", retries=4, delay=0.3):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            if hasattr(source, "seek"):
+                source.seek(0)
+            return pd.read_excel(source, sheet_name=sheet_name, header=header, engine=engine)
+        except Exception as exc:
+            last_error = exc
+            if attempt == retries - 1:
+                break
+            time.sleep(delay)
+    raise last_error
+
 def _parse_portfolio_snapshot_df(df_raw):
     try:
         h_idx = -1
@@ -330,15 +352,15 @@ def _parse_portfolio_snapshot_df(df_raw):
 
 def load_portfolio_snapshot_upload(uploaded_file):
     try:
-        df_raw = pd.read_excel(uploaded_file, sheet_name=0, header=None, engine="openpyxl")
+        df_raw = _read_excel_with_retries(uploaded_file, sheet_name=0, header=None, engine="openpyxl")
         return _parse_portfolio_snapshot_df(df_raw)
     except Exception as e:
         return None, str(e)
 
 @st.cache_data
-def load_portfolio_snapshot(file_path, mtime):
+def load_portfolio_snapshot(file_path, file_signature):
     try:
-        df_raw = pd.read_excel(file_path, sheet_name=0, header=None, engine="openpyxl")
+        df_raw = _read_excel_with_retries(file_path, sheet_name=0, header=None, engine="openpyxl")
         return _parse_portfolio_snapshot_df(df_raw)
     except Exception as e:
         return None, str(e)
@@ -1971,5 +1993,4 @@ def load_cash_equity_data(file):
 
     except Exception as e:
         return None, None, None, None, None, None, f"Process Error: {e}"
-
 
