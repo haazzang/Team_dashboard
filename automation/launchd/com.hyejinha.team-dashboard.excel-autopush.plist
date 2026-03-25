@@ -8,11 +8,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/hyejinha/Desktop/Workspace/Team/automation/scripts/auto_push_excel.sh</string>
+        <string>/Users/hyejinha/Library/Application Support/TeamDashboard/auto_push_excel.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/hyejinha/Desktop/Workspace/Team</string>
+    <string>/Users/hyejinha</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -20,6 +20,8 @@
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>/Users/hyejinha</string>
+        <key>REPO_ROOT</key>
+        <string>/Users/hyejinha/Desktop/Workspace/Team</string>
     </dict>
 
     <key>RunAtLoad</key>

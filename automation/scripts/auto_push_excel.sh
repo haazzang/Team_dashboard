@@ -12,7 +12,11 @@ if ! command -v fswatch >/dev/null 2>&1; then
   exit 1
 fi
 
-REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_ROOT="${REPO_ROOT:-}"
+if [[ -z "$REPO_ROOT" ]]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel)
+fi
+REPO_ROOT=$(cd "$REPO_ROOT" && pwd)
 FILE_PATH="${REPO_ROOT}/${FILE_NAME}"
 WATCH_DIR=$(dirname "$FILE_PATH")
 
