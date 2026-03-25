@@ -2,7 +2,6 @@ streamlit
 pandas
 numpy
 plotly
-yfinance
 openpyxl
 matplotlib
 scipy
