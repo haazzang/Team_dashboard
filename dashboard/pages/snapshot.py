@@ -130,25 +130,49 @@ def _sentiment_label(score):
         return "Sell"
     return "Strong Sell"
 
-def _build_fundamental_snapshot(profile, quote, key_metrics, ratios):
-    rows = [
-        ("Latest Price", _format_price(_first_present(quote.get("price"), profile.get("price")), _first_present(profile.get("currency"), quote.get("currency")))),
-        ("Market Cap", _format_large_number(_first_present(profile.get("marketCap"), quote.get("marketCap"), key_metrics.get("marketCap")))),
-        ("Beta", _format_decimal(profile.get("beta"))),
-        ("P/E (TTM)", _format_multiple(ratios.get("priceToEarningsRatioTTM"))),
-        ("P/B (TTM)", _format_multiple(ratios.get("priceToBookRatioTTM"))),
-        ("EV / Sales (TTM)", _format_multiple(key_metrics.get("evToSalesTTM"))),
-        ("EV / EBITDA (TTM)", _format_multiple(key_metrics.get("evToEBITDATTM"))),
-        ("ROE (TTM)", _format_percent(key_metrics.get("returnOnEquityTTM"))),
-        ("ROIC (TTM)", _format_percent(key_metrics.get("returnOnInvestedCapitalTTM"))),
-        ("Gross Margin (TTM)", _format_percent(ratios.get("grossProfitMarginTTM"))),
-        ("Operating Margin (TTM)", _format_percent(ratios.get("operatingProfitMarginTTM"))),
-        ("Net Margin (TTM)", _format_percent(ratios.get("netProfitMarginTTM"))),
-        ("Current Ratio (TTM)", _format_decimal(_first_present(ratios.get("currentRatioTTM"), key_metrics.get("currentRatioTTM")))),
-        ("Debt / Equity (TTM)", _format_decimal(ratios.get("debtToEquityRatioTTM"))),
-        ("FCF Yield (TTM)", _format_percent(key_metrics.get("freeCashFlowYieldTTM"))),
-    ]
-    return pd.DataFrame([{"Metric": label, "Value": value} for label, value in rows if value != "-"])
+def _format_range(low, high, formatter):
+    low_text = formatter(low)
+    high_text = formatter(high)
+    if low_text == "-" and high_text == "-":
+        return "-"
+    return f"{low_text} - {high_text}"
+
+def _build_fundamental_snapshot(estimates):
+    if not estimates:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(estimates)
+    if "date" not in df.columns:
+        return pd.DataFrame()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).sort_values("date")
+    if df.empty:
+        return pd.DataFrame()
+
+    today = pd.Timestamp.today().normalize()
+    future_df = df[df["date"] >= today]
+    if not future_df.empty:
+        display_df = future_df.head(5)
+    else:
+        display_df = df.sort_values("date", ascending=False).head(5).sort_values("date")
+
+    rows = []
+    for _, row in display_df.iterrows():
+        rows.append({
+            "Fiscal Date": row["date"].strftime("%Y-%m-%d"),
+            "Revenue Avg": _format_large_number(row.get("revenueAvg")),
+            "Revenue Range": _format_range(row.get("revenueLow"), row.get("revenueHigh"), _format_large_number),
+            "EBITDA Avg": _format_large_number(row.get("ebitdaAvg")),
+            "EBIT Avg": _format_large_number(row.get("ebitAvg")),
+            "Net Income Avg": _format_large_number(row.get("netIncomeAvg")),
+            "EPS Avg": _format_decimal(row.get("epsAvg")),
+            "EPS Range": _format_range(row.get("epsLow"), row.get("epsHigh"), _format_decimal),
+            "Rev Analysts": int(_coerce_float(row.get("numAnalystsRevenue")) or 0),
+            "EPS Analysts": int(_coerce_float(row.get("numAnalystsEps")) or 0),
+        })
+
+    return pd.DataFrame(rows)
 
 def _render_news_feed(title, items, empty_message):
     st.markdown(f"#### {title}")
@@ -755,8 +779,7 @@ def render_snapshot_page():
 
                 profile = intel.get("profile") or {}
                 quote = intel.get("quote") or {}
-                key_metrics = intel.get("key_metrics") or {}
-                ratios = intel.get("ratios") or {}
+                analyst_estimates = intel.get("analyst_estimates") or []
                 grades_consensus = intel.get("grades_consensus") or {}
                 grades_news = intel.get("grades_news") or []
                 stock_news = intel.get("stock_news") or []
@@ -767,7 +790,7 @@ def render_snapshot_page():
                 display_currency = _first_present(profile.get("currency"), selected_row.get("통화"), "USD")
                 latest_price = _first_present(quote.get("price"), profile.get("price"))
                 change_pct = _coerce_float(quote.get("changePercentage"))
-                market_cap = _first_present(profile.get("marketCap"), quote.get("marketCap"), key_metrics.get("marketCap"))
+                market_cap = _first_present(profile.get("marketCap"), quote.get("marketCap"))
                 sentiment_score = sentiment.get("score") if sentiment else None
                 consensus_label = str(
                     _first_present(grades_consensus.get("consensus"), _sentiment_label(sentiment_score), "N/A")
@@ -816,9 +839,10 @@ def render_snapshot_page():
 
                 with fundamentals_col:
                     st.markdown("#### Fundamental Snapshot")
-                    fundamentals_df = _build_fundamental_snapshot(profile, quote, key_metrics, ratios)
+                    st.caption(f"FMP analyst estimates 기준, 발행사 보고통화 {display_currency}")
+                    fundamentals_df = _build_fundamental_snapshot(analyst_estimates)
                     if fundamentals_df.empty:
-                        st.info("FMP fundamentals 데이터가 부족합니다.")
+                        st.info("FMP analyst estimates 데이터가 없습니다.")
                     else:
                         st.dataframe(fundamentals_df, use_container_width=True, hide_index=True)
 
