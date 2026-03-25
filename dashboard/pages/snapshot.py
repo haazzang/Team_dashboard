@@ -487,6 +487,227 @@ def _build_guidance_tracking(symbol, transcript_dates, earnings):
 
     return pd.DataFrame(rows)
 
+def _transcript_sentence_tokens(sentence):
+    return set(re.findall(r"[a-z]{4,}", str(sentence).lower()))
+
+def _sentences_too_similar(left, right, threshold=0.65):
+    left_tokens = _transcript_sentence_tokens(left)
+    right_tokens = _transcript_sentence_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+    return overlap >= threshold
+
+def _prepare_transcript_sentences(text):
+    if not text:
+        return []
+
+    normalized = " ".join(str(text).split())
+    normalized = re.sub(r"(?:^|\s)[A-Z][A-Za-z.&' -]{1,40}:\s*", " ", normalized)
+    raw_sentences = re.split(r"(?<=[.!?])\s+", normalized)
+
+    skip_phrases = (
+        "forward-looking statements",
+        "safe harbor",
+        "operator instructions",
+        "welcome to the",
+        "call is being recorded",
+        "webcast will be available",
+        "thank you for joining",
+        "question-and-answer session",
+        "actual results may differ materially",
+        "subject to a number of significant risks and uncertainties",
+    )
+
+    sentences = []
+    for sentence in raw_sentences:
+        cleaned = sentence.strip(" -")
+        lower = cleaned.lower()
+        if len(cleaned) < 60 or len(cleaned) > 420:
+            continue
+        if any(phrase in lower for phrase in skip_phrases):
+            continue
+        if cleaned.count(":") > 2:
+            continue
+        sentences.append(cleaned)
+    return sentences
+
+def _select_transcript_highlights(sentences, keyword_weights, limit=3, avoid=None):
+    avoid = avoid or []
+    scored = []
+    for sentence in sentences:
+        lower = sentence.lower()
+        score = 0.0
+        for keyword, weight in keyword_weights.items():
+            if keyword in lower:
+                score += weight
+        if score <= 0:
+            continue
+        if any(ch.isdigit() for ch in sentence):
+            score += 0.25
+        if "%" in sentence or "$" in sentence:
+            score += 0.25
+        scored.append((score, sentence))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected = []
+    blocked = list(avoid)
+    for _, sentence in scored:
+        if any(_sentences_too_similar(sentence, other) for other in blocked):
+            continue
+        selected.append(sentence)
+        blocked.append(sentence)
+        if len(selected) >= limit:
+            break
+    return selected
+
+def _build_latest_transcript_highlights(symbol, transcript_dates):
+    if not transcript_dates:
+        return {}
+
+    transcript_df = pd.DataFrame(transcript_dates)
+    if "date" not in transcript_df.columns:
+        return {}
+
+    transcript_df["date"] = pd.to_datetime(transcript_df["date"], errors="coerce")
+    transcript_df = transcript_df.dropna(subset=["date"]).sort_values("date", ascending=False)
+    if transcript_df.empty:
+        return {}
+
+    latest = transcript_df.iloc[0]
+    quarter = latest.get("quarter")
+    fiscal_year = latest.get("fiscalYear") or latest.get("year")
+    if quarter is None or fiscal_year is None:
+        return {}
+
+    transcript_rows = fetch_fmp_transcript(symbol, int(fiscal_year), int(quarter))
+    if not transcript_rows:
+        return {}
+
+    content = transcript_rows[0].get("content")
+    sentences = _prepare_transcript_sentences(content)
+    if not sentences:
+        return {
+            "date": latest["date"].strftime("%Y-%m-%d"),
+            "fiscal_period": f"Q{int(quarter)} FY{int(fiscal_year)}",
+            "categories": {},
+        }
+
+    tailwind_keywords = {
+        "demand": 2.0,
+        "strong": 1.5,
+        "record": 2.0,
+        "growth": 1.5,
+        "accelerat": 2.0,
+        "adoption": 2.0,
+        "ramp": 2.0,
+        "momentum": 2.0,
+        "expand": 1.5,
+        "improv": 1.5,
+        "best ever": 2.5,
+        "opportunity": 1.5,
+        "leadership": 1.5,
+        "strength": 1.5,
+    }
+    headwind_keywords = {
+        "tariff": 2.5,
+        "macro": 2.0,
+        "headwind": 2.5,
+        "pressure": 2.0,
+        "constraint": 2.0,
+        "constraints": 2.0,
+        "supply constraint": 2.5,
+        "supply constraints": 2.5,
+        "weakness": 2.0,
+        "decline": 2.0,
+        "regulatory": 2.0,
+        "competition": 1.5,
+        "slowdown": 2.0,
+        "foreign exchange": 2.0,
+        "uncertainty": 2.0,
+        "geopolitical": 2.0,
+        "risk": 1.5,
+    }
+    outlook_keywords = {
+        "expect": 2.5,
+        "outlook": 2.0,
+        "guidance": 2.0,
+        "next quarter": 2.0,
+        "first quarter": 2.0,
+        "second quarter": 2.0,
+        "third quarter": 2.0,
+        "fourth quarter": 2.0,
+        "fiscal": 1.5,
+        "looking ahead": 2.0,
+        "plus or minus": 2.0,
+        "will be": 1.0,
+    }
+    bull_keywords = {
+        "opportunity": 2.5,
+        "leadership": 2.0,
+        "platform shift": 2.5,
+        "record": 2.0,
+        "best ever": 2.5,
+        "expand": 1.5,
+        "accelerat": 2.0,
+        "pipeline": 2.0,
+        "adoption": 2.0,
+        "scale": 1.5,
+        "share gains": 2.0,
+        "secular": 2.0,
+        "capacity": 1.5,
+    }
+    bear_keywords = {
+        "risk": 2.5,
+        "uncertainty": 2.5,
+        "tariff": 2.5,
+        "regulatory": 2.0,
+        "competition": 2.0,
+        "constraint": 2.0,
+        "constraints": 2.0,
+        "supply constraint": 2.5,
+        "supply constraints": 2.5,
+        "macro": 2.0,
+        "pressure": 2.0,
+        "cyclical": 2.0,
+        "slowdown": 2.0,
+        "volatile": 2.0,
+        "headwind": 2.5,
+        "adverse": 2.0,
+        "materially": 1.5,
+    }
+
+    tailwinds = _select_transcript_highlights(sentences, tailwind_keywords, limit=3)
+    headwinds = _select_transcript_highlights(sentences, headwind_keywords, limit=3)
+    outlook = _select_transcript_highlights(sentences, outlook_keywords, limit=3)
+    bull_points = _select_transcript_highlights(sentences, bull_keywords, limit=3, avoid=tailwinds)
+    bear_points = _select_transcript_highlights(sentences, bear_keywords, limit=3, avoid=headwinds)
+
+    if not bull_points:
+        bull_points = tailwinds[:2]
+    if not bear_points:
+        bear_points = headwinds[:2]
+
+    return {
+        "date": latest["date"].strftime("%Y-%m-%d"),
+        "fiscal_period": f"Q{int(quarter)} FY{int(fiscal_year)}",
+        "categories": {
+            "Tailwinds": tailwinds,
+            "Headwinds": headwinds,
+            "Outlook": outlook,
+            "Bull Points": bull_points,
+            "Bear Points": bear_points,
+        },
+    }
+
+def _render_highlight_list(title, items, empty_message):
+    st.markdown(f"#### {title}")
+    if not items:
+        st.info(empty_message)
+        return
+    for item in items:
+        st.write(f"- {item}")
+
 def _render_news_feed(title, items, empty_message):
     st.markdown(f"#### {title}")
     if not items:
@@ -1103,6 +1324,7 @@ def render_snapshot_page():
                 stock_news = intel.get("stock_news") or []
                 press_releases = intel.get("press_releases") or []
                 sentiment = calculate_analyst_sentiment(grades_consensus)
+                transcript_highlights = _build_latest_transcript_highlights(selected_symbol, transcript_dates)
 
                 company_name = _first_present(profile.get("companyName"), selected_row.get("종목명"), selected_symbol)
                 display_currency = _first_present(profile.get("currency"), selected_row.get("통화"), "USD")
@@ -1236,6 +1458,45 @@ def render_snapshot_page():
                         use_container_width=True,
                         hide_index=True,
                     )
+
+                st.markdown("#### Latest Earnings Transcript Highlights")
+                if not transcript_highlights:
+                    st.info("가장 최근 earnings transcript coverage가 없습니다.")
+                else:
+                    st.caption(
+                        f"Latest transcript: {transcript_highlights.get('fiscal_period', '-')}"
+                        f" | call date {transcript_highlights.get('date', '-')}"
+                        " | heuristic extraction"
+                    )
+                    transcript_categories = transcript_highlights.get("categories", {})
+                    tcol1, tcol2 = st.columns(2)
+                    with tcol1:
+                        _render_highlight_list(
+                            "Tailwinds",
+                            transcript_categories.get("Tailwinds", []),
+                            "유의미한 tailwind 문장을 찾지 못했습니다.",
+                        )
+                        _render_highlight_list(
+                            "Outlook",
+                            transcript_categories.get("Outlook", []),
+                            "유의미한 outlook 문장을 찾지 못했습니다.",
+                        )
+                        _render_highlight_list(
+                            "Bull Points",
+                            transcript_categories.get("Bull Points", []),
+                            "유의미한 bull point를 찾지 못했습니다.",
+                        )
+                    with tcol2:
+                        _render_highlight_list(
+                            "Headwinds",
+                            transcript_categories.get("Headwinds", []),
+                            "유의미한 headwind 문장을 찾지 못했습니다.",
+                        )
+                        _render_highlight_list(
+                            "Bear Points",
+                            transcript_categories.get("Bear Points", []),
+                            "유의미한 bear point를 찾지 못했습니다.",
+                        )
 
                 st.markdown("#### Revenue Guidance Beat / Miss")
                 st.caption("Transcript에서 revenue guidance를 heuristic으로 추출한 결과입니다. transcript coverage가 있는 종목만 표시됩니다.")
