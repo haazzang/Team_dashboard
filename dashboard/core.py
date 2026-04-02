@@ -173,8 +173,11 @@ def get_fmp_api_key():
     env_key = os.getenv("FMP_API_KEY")
     if env_key:
         return env_key.strip()
-    if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
-        return str(st.secrets["FMP_API_KEY"]).strip()
+    try:
+        if hasattr(st, "secrets") and "FMP_API_KEY" in st.secrets:
+            return str(st.secrets["FMP_API_KEY"]).strip()
+    except Exception:
+        pass
     return DEFAULT_FMP_API_KEY
 
 def to_fmp_symbol(symbol):
@@ -1930,6 +1933,7 @@ def _serialize_stats_for_gpt(stats_res):
             factor = d.get('factor')
             idx = d.get('indices')
             risk = d.get('risk')
+            benchmark_comparison = d.get('benchmark_comparison')
             hedge_contrib = d.get('hedge_contrib')
             hedge_pnl_krw = d.get('hedge_pnl_krw')
             out[period] = {
@@ -1942,6 +1946,8 @@ def _serialize_stats_for_gpt(stats_res):
                 'sector_contrib': sect.to_dict() if hasattr(sect, 'to_dict') else {},
                 'factor_contrib': factor.to_dict() if hasattr(factor, 'to_dict') else {},
                 'indices_return': idx.to_dict() if hasattr(idx, 'to_dict') else {},
+                'benchmark_relative_metrics': benchmark_comparison.to_dict(orient='records')
+                if hasattr(benchmark_comparison, 'to_dict') and not benchmark_comparison.empty else [],
                 'hedge_contrib': _safe_float_or_none(hedge_contrib),
                 'hedge_pnl_krw': _safe_float_or_none(hedge_pnl_krw),
                 'risk_metrics': _clean_risk_metrics(risk),
