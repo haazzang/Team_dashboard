@@ -2330,7 +2330,7 @@ def load_cash_equity_data(file):
         
         min_d, max_d = df_perf.index.min(), df_perf.index.max()
         usdkrw = download_usdkrw(min_d, max_d)
-        df_perf = df_perf.join(usdkrw, how='left').fillna(method='ffill').fillna(1400.0)
+        df_perf = df_perf.join(usdkrw, how='left').ffill().fillna(1400.0)
         if 'USD_KRW' not in df_perf.columns: df_perf['USD_KRW'] = 1400.0
         
         df_perf['Hedge_PnL_USD'] = df_perf['Hedge_PnL_KRW'] / df_perf['USD_KRW']
