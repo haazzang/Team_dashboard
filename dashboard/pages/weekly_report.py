@@ -99,13 +99,21 @@ def _build_monthly_relative_tables(portfolio_returns, benchmark_prices):
     port_ret = pd.Series(portfolio_returns).dropna()
     if port_ret.empty:
         return pd.DataFrame(), pd.DataFrame()
+    port_ret.index = pd.to_datetime(port_ret.index, errors="coerce")
+    port_ret = port_ret[~port_ret.index.isna()].sort_index()
+    if port_ret.empty:
+        return pd.DataFrame(), pd.DataFrame()
 
     benchmark_returns = benchmark_prices.ffill().pct_change(fill_method=None).dropna(how="all")
     if benchmark_returns.empty:
         return pd.DataFrame(), pd.DataFrame()
+    benchmark_returns.index = pd.to_datetime(benchmark_returns.index, errors="coerce")
+    benchmark_returns = benchmark_returns.loc[~benchmark_returns.index.isna()].sort_index()
+    if benchmark_returns.empty:
+        return pd.DataFrame(), pd.DataFrame()
 
-    monthly_port = (1 + port_ret).resample("M").prod() - 1
-    monthly_bench = (1 + benchmark_returns).resample("M").prod() - 1
+    monthly_port = (1 + port_ret).resample("ME").prod() - 1
+    monthly_bench = (1 + benchmark_returns).resample("ME").prod() - 1
     monthly = monthly_bench.copy()
     monthly.insert(0, "Portfolio", monthly_port.reindex(monthly_bench.index))
     monthly = monthly.dropna(how="all")
