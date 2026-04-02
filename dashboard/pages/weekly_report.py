@@ -4,6 +4,10 @@ import dashboard.core as core
 from dashboard.core import *  # noqa: F401,F403
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+WEEKLY_REPORT_DEFAULT_FILES = [
+    "2026_멀티.xlsx",
+    "Holdings3.xlsx",
+]
 WEEKLY_REPORT_BENCHMARKS = {
     "SPX": "^GSPC",
     "NDX": "^NDX",
@@ -177,25 +181,32 @@ def _resolve_weekly_report_source(uploaded_file):
     ]
     candidates = []
 
-    env_path = os.getenv("HOLDINGS3_XLSX_PATH")
-    if env_path:
-        resolved_env = core._resolve_normalized_path(env_path)
-        candidates.append(resolved_env if resolved_env else Path(env_path))
+    for key in ["WEEKLY_REPORT_XLSX_PATH", "HOLDINGS3_XLSX_PATH"]:
+        env_path = os.getenv(key)
+        if env_path:
+            resolved_env = core._resolve_normalized_path(env_path)
+            candidates.append(resolved_env if resolved_env else Path(env_path))
 
-    secret_path = core._get_streamlit_secret("HOLDINGS3_XLSX_PATH")
-    if secret_path:
-        resolved_secret = core._resolve_normalized_path(secret_path)
-        candidates.append(resolved_secret if resolved_secret else Path(secret_path))
+        secret_path = core._get_streamlit_secret(key)
+        if secret_path:
+            resolved_secret = core._resolve_normalized_path(secret_path)
+            candidates.append(resolved_secret if resolved_secret else Path(secret_path))
 
-    candidates.extend([
-        ROOT_DIR / "Holdings3.xlsx",
-        Path.cwd() / "Holdings3.xlsx",
-        Path.home() / "Desktop" / "Workspace" / "Team" / "Holdings3.xlsx",
-    ])
+    default_dirs = [
+        ROOT_DIR,
+        Path.cwd(),
+        Path.home() / "Desktop" / "Workspace" / "Team",
+    ]
+    for file_name in WEEKLY_REPORT_DEFAULT_FILES:
+        for folder in default_dirs:
+            candidates.append(folder / file_name)
 
     data_path = next((p for p in candidates if p is not None and Path(p).exists()), None)
     if data_path is None:
-        data_path = core._find_file_by_name("Holdings3.xlsx", base_dirs)
+        for file_name in WEEKLY_REPORT_DEFAULT_FILES:
+            data_path = core._find_file_by_name(file_name, base_dirs)
+            if data_path is not None:
+                break
 
     if data_path is None:
         return None, None, None
@@ -203,15 +214,15 @@ def _resolve_weekly_report_source(uploaded_file):
 
 def render_weekly_report_page():
     st.subheader("📑 Weekly Meeting Report Generator")
-    uploaded_file_ce = st.sidebar.file_uploader("Upload 'Holdings3.xlsx' for Report", type=['xlsx'], key="rep")
+    uploaded_file_ce = st.sidebar.file_uploader("Optional override upload for report", type=['xlsx'], key="rep")
     data_source, source_label, source_type = _resolve_weekly_report_source(uploaded_file_ce)
 
     if data_source is None:
-        st.info("Holdings3.xlsx 파일을 업로드하거나 HOLDINGS3_XLSX_PATH 환경변수/시크릿으로 경로를 지정하세요.")
+        st.info("기본 파일 `2026_멀티.xlsx`를 찾지 못했습니다. 필요하면 업로드하거나 `WEEKLY_REPORT_XLSX_PATH`를 지정하세요.")
         return
 
     if source_type == "local":
-        st.sidebar.caption(f"Using local file: {source_label}")
+        st.sidebar.caption(f"Using default local file: {source_label}")
 
     with st.spinner("Generating Report Data..."):
         res = load_cash_equity_data(data_source)
