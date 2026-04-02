@@ -630,6 +630,59 @@ def _find_file_by_name(target_name, search_dirs):
                 return f
     return None
 
+def _get_streamlit_secret(key, default=None):
+    try:
+        secrets = getattr(st, "secrets", None)
+        if secrets is None:
+            return default
+        value = secrets.get(key, default)
+        if value in (None, ""):
+            return default
+        return value
+    except Exception:
+        return default
+
+def _coerce_excel_input(file):
+    if file is None:
+        return None
+    if isinstance(file, (str, os.PathLike, Path, bytes, bytearray)):
+        return file
+    if hasattr(file, "getvalue"):
+        data = file.getvalue()
+        return bytes(data) if data is not None else None
+    if hasattr(file, "seek") and hasattr(file, "read"):
+        try:
+            current_pos = file.tell()
+        except Exception:
+            current_pos = None
+        try:
+            file.seek(0)
+            data = file.read()
+            return bytes(data) if data is not None else None
+        finally:
+            if current_pos is not None:
+                try:
+                    file.seek(current_pos)
+                except Exception:
+                    pass
+    return file
+
+def _fresh_excel_source(source):
+    if source is None:
+        return None
+    if isinstance(source, (str, os.PathLike, Path)):
+        return source
+    if isinstance(source, bytearray):
+        return BytesIO(bytes(source))
+    if isinstance(source, bytes):
+        return BytesIO(source)
+    if hasattr(source, "seek"):
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+    return source
+
 def get_file_signature(path):
     try:
         stat = Path(path).stat()
@@ -641,9 +694,7 @@ def _read_excel_with_retries(source, *, sheet_name=0, header=None, engine="openp
     last_error = None
     for attempt in range(retries):
         try:
-            if hasattr(source, "seek"):
-                source.seek(0)
-            return pd.read_excel(source, sheet_name=sheet_name, header=header, engine=engine)
+            return pd.read_excel(_fresh_excel_source(source), sheet_name=sheet_name, header=header, engine=engine)
         except Exception as exc:
             last_error = exc
             if attempt == retries - 1:
@@ -2076,14 +2127,15 @@ def load_team_pnl_data(file):
 def load_cash_equity_data(file):
     debug_logs = []
     try:
-        xls = pd.ExcelFile(file, engine='openpyxl')
+        excel_source = _coerce_excel_input(file)
+        xls = pd.ExcelFile(_fresh_excel_source(excel_source), engine='openpyxl')
         all_holdings = []
         df_hedge = pd.DataFrame()
         
         for sheet in xls.sheet_names:
             if 'hedge' in sheet.lower() or '헷지' in sheet:
                 try:
-                    df_h = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
+                    df_h = _read_excel_with_retries(excel_source, sheet_name=sheet, header=None, engine='openpyxl')
                     h_idx = -1
                     for i in range(15):
                         if '기준일자' in [str(x).strip() for x in df_h.iloc[i].values]:
@@ -2108,7 +2160,7 @@ def load_cash_equity_data(file):
                 except: pass
             else:
                 try:
-                    df = pd.read_excel(file, sheet_name=sheet, header=None, engine='openpyxl')
+                    df = _read_excel_with_retries(excel_source, sheet_name=sheet, header=None, engine='openpyxl')
                     h_idx = -1
                     for i in range(15):
                         row_vals = [str(x).strip() for x in df.iloc[i].values]
