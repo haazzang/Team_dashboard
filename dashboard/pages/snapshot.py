@@ -1053,6 +1053,7 @@ def render_snapshot_page():
             st.plotly_chart(fig_fx, use_container_width=True)
 
             st.markdown("#### 🆚 S&P 500 섹터 Weight 차이 (Portfolio - SP500)")
+            st.caption("FMP S&P 500 constituents와 FMP market cap proxy 기준 비교입니다.")
             with st.spinner("S&P 500 섹터 가중치 계산 중..."):
                 sp_sector = fetch_sp500_sector_weights()
             if sp_sector.empty:
