@@ -250,6 +250,42 @@ def fetch_fmp_quote(symbol):
     except Exception:
         return {}
 
+@st.cache_data(ttl=3600)
+def fetch_fmp_batch_quotes(symbols):
+    clean_symbols = []
+    seen = set()
+    for symbol in symbols or ():
+        fmp_symbol = to_fmp_symbol(symbol)
+        if not fmp_symbol or fmp_symbol in seen:
+            continue
+        clean_symbols.append(fmp_symbol)
+        seen.add(fmp_symbol)
+
+    if not clean_symbols:
+        return pd.DataFrame()
+
+    rows = []
+    chunk_size = 100
+    for start in range(0, len(clean_symbols), chunk_size):
+        chunk = clean_symbols[start:start + chunk_size]
+        try:
+            data = _fmp_request_json("/batch-quote", {"symbols": ",".join(chunk)})
+        except Exception:
+            continue
+        if isinstance(data, list):
+            rows.extend(data)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    if df.empty or "symbol" not in df.columns:
+        return pd.DataFrame()
+
+    df["symbol"] = df["symbol"].astype(str).str.strip()
+    df = df[df["symbol"] != ""].copy()
+    return df.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+
 @st.cache_data(ttl=1800)
 def fetch_fmp_recent_close(symbol, lookback_days=10):
     quote = fetch_fmp_quote(symbol)
@@ -519,44 +555,67 @@ def _normalize_sp500_symbol(symbol):
     return sym.replace(".", "-")
 
 @st.cache_data(ttl=3600)
-def fetch_sp500_weights():
-    url = "https://www.slickcharts.com/sp500"
+def fetch_sp500_constituents_fmp():
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
+        data = _fmp_request_json("/sp500-constituent")
     except Exception:
         return pd.DataFrame()
 
-    try:
-        from bs4 import BeautifulSoup
-    except ModuleNotFoundError:
+    if not isinstance(data, list) or not data:
         return pd.DataFrame()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    tables = soup.find_all("table")
-    for table in tables:
-        headers = [th.get_text(strip=True) for th in table.find_all("th")]
-        if "Symbol" in headers and "Weight" in headers:
-            symbol_idx = headers.index("Symbol")
-            weight_idx = headers.index("Weight")
-            rows = []
-            for tr in table.find_all("tr")[1:]:
-                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-                if len(cols) <= max(symbol_idx, weight_idx):
-                    continue
-                symbol = cols[symbol_idx]
-                weight_str = cols[weight_idx].replace("%", "").replace(",", "")
-                try:
-                    weight = float(weight_str) / 100.0
-                except ValueError:
-                    continue
-                rows.append({"Symbol": symbol, "Weight": weight})
-            return pd.DataFrame(rows)
-    return pd.DataFrame()
+    df = pd.DataFrame(data)
+    required_cols = {"symbol", "sector"}
+    if not required_cols.issubset(df.columns):
+        return pd.DataFrame()
+    df = df.rename(columns={"symbol": "Symbol", "sector": "Sector"})
+    df["Symbol"] = df["Symbol"].astype(str).str.strip()
+    df["Sector"] = df["Sector"].fillna("Unknown").astype(str).str.strip()
+    df = df[df["Symbol"] != ""].copy()
+    df["Symbol"] = df["Symbol"].apply(_normalize_sp500_symbol)
+    return df[["Symbol", "Sector"]].drop_duplicates(subset=["Symbol"]).reset_index(drop=True)
+
+@st.cache_data(ttl=3600)
+def fetch_sp500_weights():
+    constituents = fetch_sp500_constituents_fmp()
+    if constituents.empty:
+        return pd.DataFrame()
+
+    symbols = constituents["Symbol"].dropna().astype(str).tolist()
+    if not symbols:
+        return pd.DataFrame()
+
+    quotes = fetch_fmp_batch_quotes(tuple(symbols))
+    if quotes.empty or "marketCap" not in quotes.columns:
+        return pd.DataFrame()
+
+    quotes = quotes.rename(columns={"symbol": "Symbol", "marketCap": "MarketCap"})
+    quotes["Symbol"] = quotes["Symbol"].apply(_normalize_sp500_symbol)
+    quotes["MarketCap"] = pd.to_numeric(quotes["MarketCap"], errors="coerce")
+    quotes = quotes[quotes["MarketCap"] > 0].copy()
+    if quotes.empty:
+        return pd.DataFrame()
+
+    weights = constituents[["Symbol"]].merge(
+        quotes[["Symbol", "MarketCap"]].drop_duplicates(subset=["Symbol"]),
+        on="Symbol",
+        how="inner",
+    )
+    if weights.empty:
+        return pd.DataFrame()
+
+    total_market_cap = weights["MarketCap"].sum()
+    if total_market_cap <= 0:
+        return pd.DataFrame()
+    weights["Weight"] = weights["MarketCap"] / total_market_cap
+    return weights[["Symbol", "Weight"]].sort_values("Weight", ascending=False).reset_index(drop=True)
 
 @st.cache_data(ttl=3600)
 def fetch_sp500_sector_map():
+    constituents = fetch_sp500_constituents_fmp()
+    if not constituents.empty:
+        return constituents[["Symbol", "Sector"]].copy()
+
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
