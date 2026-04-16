@@ -5,6 +5,10 @@ from dashboard.core import *  # noqa: F401,F403
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SNAPSHOT_AUTO_REFRESH_SECONDS = 2
+SNAPSHOT_SOURCE_FILES = {
+    "2026_멀티": "2026_멀티.xlsx",
+    "2026_주운": "2026_주운.xlsx",
+}
 
 def _snapshot_watch_key(data_path):
     return f"snapshot_watch::{Path(data_path).resolve()}"
@@ -39,6 +43,45 @@ def _watch_snapshot_file(data_path):
     if last_refreshed:
         status_parts.append(f"마지막 반영 {last_refreshed}")
     st.caption(" | ".join(status_parts))
+
+def _resolve_snapshot_data_path(filename):
+    script_dir = ROOT_DIR
+    base_dirs = [
+        script_dir,
+        Path.cwd(),
+        Path.home() / "Desktop" / "Workspace" / "Team",
+    ]
+
+    candidates = []
+    env_path = os.getenv("PORTFOLIO_XLSX_PATH")
+    if env_path:
+        resolved_env = _resolve_normalized_path(env_path)
+        env_candidate = resolved_env if resolved_env else Path(env_path)
+        if env_candidate.is_dir():
+            candidates.append(env_candidate / filename)
+        elif _normalize_filename(env_candidate.name) == _normalize_filename(filename):
+            candidates.append(env_candidate)
+
+    if hasattr(st, "secrets") and "PORTFOLIO_XLSX_PATH" in st.secrets:
+        secret_path = st.secrets["PORTFOLIO_XLSX_PATH"]
+        resolved_secret = _resolve_normalized_path(secret_path)
+        secret_candidate = resolved_secret if resolved_secret else Path(secret_path)
+        if secret_candidate.is_dir():
+            candidates.append(secret_candidate / filename)
+        elif _normalize_filename(secret_candidate.name) == _normalize_filename(filename):
+            candidates.append(secret_candidate)
+
+    candidates.extend([
+        script_dir / filename,
+        Path.cwd() / filename,
+        Path.home() / "Desktop" / "Workspace" / "Team" / filename,
+    ])
+
+    data_path = next((p for p in candidates if p is not None and p.exists()), None)
+    if data_path is None:
+        data_path = _find_file_by_name(filename, base_dirs)
+
+    return data_path, candidates
 
 def _first_present(*values):
     for value in values:
@@ -758,40 +801,30 @@ def _render_news_feed(title, items, empty_message):
             st.divider()
 
 def render_snapshot_page():
-    st.subheader("📌 Portfolio Snapshot (2026_멀티.xlsx)")
-    script_dir = ROOT_DIR
-    base_dirs = [
-        script_dir,
-        Path.cwd(),
-        Path.home() / "Desktop" / "Workspace" / "Team",
-    ]
-    candidates = []
-    env_path = os.getenv("PORTFOLIO_XLSX_PATH")
-    if env_path:
-        resolved_env = _resolve_normalized_path(env_path)
-        candidates.append(resolved_env if resolved_env else Path(env_path))
-    if hasattr(st, "secrets") and "PORTFOLIO_XLSX_PATH" in st.secrets:
-        secret_path = st.secrets["PORTFOLIO_XLSX_PATH"]
-        resolved_secret = _resolve_normalized_path(secret_path)
-        candidates.append(resolved_secret if resolved_secret else Path(secret_path))
-    candidates.extend([
-        script_dir / "2026_멀티.xlsx",
-        Path.cwd() / "2026_멀티.xlsx",
-        Path.home() / "Desktop" / "Workspace" / "Team" / "2026_멀티.xlsx",
-    ])
-    data_path = next((p for p in candidates if p is not None and p.exists()), None)
-    if data_path is None:
-        data_path = _find_file_by_name("2026_멀티.xlsx", base_dirs)
+    selected_snapshot_label = st.radio(
+        "원본 파일 선택",
+        options=list(SNAPSHOT_SOURCE_FILES.keys()),
+        horizontal=True,
+        key="snapshot_source_file",
+    )
+    snapshot_filename = SNAPSHOT_SOURCE_FILES[selected_snapshot_label]
+    st.subheader(f"📌 Portfolio Snapshot ({snapshot_filename})")
+
+    data_path, candidates = _resolve_snapshot_data_path(snapshot_filename)
 
     uploaded_snapshot = None
     if data_path is None:
-        st.error("2026_멀티.xlsx 파일을 찾지 못했습니다.")
+        st.error(f"{snapshot_filename} 파일을 찾지 못했습니다.")
         st.caption("컨테이너/배포 환경에서는 로컬 파일이 보이지 않을 수 있습니다.")
         st.caption(
             "해결: 1) 파일을 앱 폴더에 복사하거나 2) PORTFOLIO_XLSX_PATH 환경변수/시크릿으로 경로를 지정하세요."
         )
         st.caption("검색 경로: " + " , ".join(str(p) for p in candidates if p is not None))
-        uploaded_snapshot = st.file_uploader("Upload '2026_멀티.xlsx'", type=['xlsx'], key="snapshot_upload")
+        uploaded_snapshot = st.file_uploader(
+            f"Upload '{snapshot_filename}'",
+            type=["xlsx"],
+            key=f"snapshot_upload_{selected_snapshot_label}",
+        )
         if uploaded_snapshot is None:
             st.stop()
 
