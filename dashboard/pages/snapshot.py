@@ -87,6 +87,12 @@ def _format_percent(value):
         return "-"
     return f"{number:.2%}"
 
+def _format_signed_percent(value):
+    number = _coerce_float(value)
+    if number is None:
+        return "-"
+    return f"{number:+.2%}"
+
 def _format_multiple(value):
     number = _coerce_float(value)
     if number is None:
@@ -324,6 +330,8 @@ def _build_earnings_surprise_history(earnings):
 
     df["EPS Surprise %"] = df.apply(lambda row: _compute_surprise_pct(row.get("epsActual"), row.get("epsEstimated")), axis=1)
     df["Revenue Surprise %"] = df.apply(lambda row: _compute_surprise_pct(row.get("revenueActual"), row.get("revenueEstimated")), axis=1)
+    df["EPS Surprise %"] = pd.to_numeric(df["EPS Surprise %"], errors="coerce")
+    df["Revenue Surprise %"] = pd.to_numeric(df["Revenue Surprise %"], errors="coerce")
     df["EPS Outcome"] = df.apply(lambda row: _surprise_outcome(row.get("epsActual"), row.get("epsEstimated")), axis=1)
     df["Revenue Outcome"] = df.apply(lambda row: _surprise_outcome(row.get("revenueActual"), row.get("revenueEstimated")), axis=1)
     df["Report Date"] = df["date"].dt.strftime("%Y-%m-%d")
@@ -485,7 +493,14 @@ def _build_guidance_tracking(symbol, transcript_dates, earnings):
             "Source Snippet": guidance["snippet"],
         })
 
-    return pd.DataFrame(rows)
+    guidance_df = pd.DataFrame(rows)
+    if guidance_df.empty:
+        return guidance_df
+
+    for column in ("Guidance Low", "Guidance High", "Guidance Mid", "Delta vs Mid %", "Delta vs Range %"):
+        if column in guidance_df.columns:
+            guidance_df[column] = pd.to_numeric(guidance_df[column], errors="coerce")
+    return guidance_df
 
 def _transcript_sentence_tokens(sentence):
     return set(re.findall(r"[a-z]{4,}", str(sentence).lower()))
@@ -1405,12 +1420,16 @@ def render_snapshot_page():
                     e1.metric(
                         "Latest EPS Surprise",
                         latest_surprise["EPS Outcome"],
-                        delta=f"{latest_surprise['EPS Surprise %']:+.2%}" if pd.notnull(latest_surprise["EPS Surprise %"]) else None,
+                        delta=_format_signed_percent(latest_surprise["EPS Surprise %"])
+                        if _coerce_float(latest_surprise["EPS Surprise %"]) is not None
+                        else None,
                     )
                     e2.metric(
                         "Latest Revenue Surprise",
                         latest_surprise["Revenue Outcome"],
-                        delta=f"{latest_surprise['Revenue Surprise %']:+.2%}" if pd.notnull(latest_surprise["Revenue Surprise %"]) else None,
+                        delta=_format_signed_percent(latest_surprise["Revenue Surprise %"])
+                        if _coerce_float(latest_surprise["Revenue Surprise %"]) is not None
+                        else None,
                     )
                     e3.metric("Latest Report", latest_surprise["Report Date"])
 
@@ -1453,8 +1472,8 @@ def render_snapshot_page():
                                 "Revenue Surprise %",
                             ]
                         ].style.format({
-                            "EPS Surprise %": "{:+.2%}",
-                            "Revenue Surprise %": "{:+.2%}",
+                            "EPS Surprise %": _format_signed_percent,
+                            "Revenue Surprise %": _format_signed_percent,
                         }),
                         use_container_width=True,
                         hide_index=True,
@@ -1510,11 +1529,12 @@ def render_snapshot_page():
                     g1.metric("Latest Guidance Outcome", latest_guidance["Outcome"])
                     g2.metric(
                         "Delta vs Mid",
-                        f"{latest_guidance['Delta vs Mid %']:+.2%}" if pd.notnull(latest_guidance["Delta vs Mid %"]) else "-",
+                        _format_signed_percent(latest_guidance["Delta vs Mid %"]),
                     )
                     g3.metric("Target Report", latest_guidance["Target Report"])
 
                     chart_df = guidance_df.copy().iloc[::-1]
+                    chart_df["Delta vs Mid %"] = pd.to_numeric(chart_df["Delta vs Mid %"], errors="coerce")
                     fig_guidance = go.Figure(data=go.Bar(
                         x=chart_df["Target Report"],
                         y=chart_df["Delta vs Mid %"],
@@ -1523,7 +1543,7 @@ def render_snapshot_page():
                             for outcome in chart_df["Outcome"]
                         ],
                         text=[
-                            f"{value:+.2%}" if pd.notnull(value) else "Pending"
+                            _format_signed_percent(value) if _coerce_float(value) is not None else "Pending"
                             for value in chart_df["Delta vs Mid %"]
                         ],
                         textposition="auto",
@@ -1550,8 +1570,8 @@ def render_snapshot_page():
                                 "Delta vs Range %",
                             ]
                         ].style.format({
-                            "Delta vs Mid %": "{:+.2%}",
-                            "Delta vs Range %": "{:+.2%}",
+                            "Delta vs Mid %": _format_signed_percent,
+                            "Delta vs Range %": _format_signed_percent,
                         }),
                         use_container_width=True,
                         hide_index=True,
