@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 from dashboard.core import *  # noqa: F401,F403
+from dashboard.core import _find_file_by_name, _normalize_filename, _resolve_normalized_path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SNAPSHOT_AUTO_REFRESH_SECONDS = 2
@@ -808,7 +809,7 @@ def render_snapshot_page():
         key="snapshot_source_file",
     )
     snapshot_filename = SNAPSHOT_SOURCE_FILES[selected_snapshot_label]
-    st.subheader(f"📌 Portfolio Snapshot ({snapshot_filename})")
+    st.subheader(f"Portfolio Snapshot ({snapshot_filename})")
 
     data_path, candidates = _resolve_snapshot_data_path(snapshot_filename)
 
@@ -961,10 +962,10 @@ def render_snapshot_page():
 
         # 탭 생성: 현황 / 전일 등락률 / 종목별 인텔 / 시뮬레이션
         tab_snapshot, tab_heatmap, tab_intel, tab_simulation = st.tabs([
-            "📊 포트폴리오 현황",
-            "🟩 전일 등락률 Heatmap",
-            "🧠 포트폴리오 종목 정보",
-            "🔬 포트폴리오 시뮬레이션",
+            "포트폴리오 현황",
+            "전일 등락률 Heatmap",
+            "포트폴리오 종목 정보",
+            "포트폴리오 시뮬레이션",
         ])
 
         with tab_snapshot:
@@ -994,7 +995,7 @@ def render_snapshot_page():
 
                 st.caption(f"ETF 비중: {etf_weight:.2%} (섹터 비중/비교는 ETF 제외 기준)")
 
-                st.markdown("#### 🧬 지수 복제율 (Holdings-based)")
+                st.markdown("#### 지수 복제율 (Holdings-based)")
                 st.caption("보유 비중 기준 최근 수익률로 계산한 SPX/NDX 복제율(R²)입니다.")
                 rep_lookback = st.slider(
                     "Lookback window (trading days)",
@@ -1053,7 +1054,7 @@ def render_snapshot_page():
                         else:
                             st.write("Not enough data for rolling replication (need 20+ data points).")
 
-                st.markdown("#### 🔎 보유 종목 비중")
+                st.markdown("#### 보유 종목 비중")
                 top_holdings = holdings.sort_values("Weight", ascending=False).head(15)
                 fig_hold = go.Figure(
                     data=go.Bar(
@@ -1066,7 +1067,7 @@ def render_snapshot_page():
             fig_hold.update_layout(yaxis_tickformat=".1%", xaxis_title="", yaxis_title="Weight")
             st.plotly_chart(fig_hold, use_container_width=True)
 
-            st.markdown("#### 🧭 섹터 비중")
+            st.markdown("#### 섹터 비중")
             if sector_data_available:
                 fig_sector = go.Figure(
                     data=go.Pie(labels=sector_weights_display.index, values=sector_weights_display.values, hole=0.45)
@@ -1088,7 +1089,7 @@ def render_snapshot_page():
                     ).style.format({"Weight": "{:.2%}"})
                 )
 
-            st.markdown("#### 💱 통화 비중")
+            st.markdown("#### 통화 비중")
             fig_fx = go.Figure(
                 data=go.Bar(
                     x=currency_weights_pct.index.astype(str),
@@ -1133,7 +1134,7 @@ def render_snapshot_page():
                 st.dataframe(comp.style.format("{:.2%}"))
 
             # 포트폴리오 베타 (30/60/90일, 국가별)
-            st.markdown("#### 📊 포트폴리오 베타 (국가별 벤치마크)")
+            st.markdown("#### 포트폴리오 베타 (국가별 벤치마크)")
             st.caption("각 국가 벤치마크 대비 포트폴리오 베타입니다. 베타 > 1이면 벤치마크보다 변동성이 큽니다.")
 
             with st.spinner("베타 계산 중..."):
@@ -1190,7 +1191,7 @@ def render_snapshot_page():
                 st.warning("베타를 계산할 수 없습니다.")
 
             # 팩터 익스포저
-            st.markdown("#### 📈 팩터 익스포저 (Factor Exposure)")
+            st.markdown("#### 팩터 익스포저 (Factor Exposure)")
             st.caption("팩터 ETF 대비 베타로 측정한 익스포저입니다. (60일 기준)")
 
             with st.spinner("팩터 익스포저 계산 중..."):
@@ -1230,7 +1231,7 @@ def render_snapshot_page():
             else:
                 st.warning("팩터 익스포저를 계산할 수 없습니다.")
 
-            st.markdown("#### 📋 보유 종목 상세")
+            st.markdown("#### 보유 종목 상세")
             show_cols = ["Group_ID", "종목명", "섹터", "통화", "원화평가금액", "Weight"]
             show_cols = [c for c in show_cols if c in holdings.columns]
             st.dataframe(holdings.sort_values("Weight", ascending=False)[show_cols].style.format({
@@ -1239,7 +1240,7 @@ def render_snapshot_page():
             }))
 
         with tab_heatmap:
-            st.markdown("### 🟩 보유 종목 전일 등락률 Heatmap")
+            st.markdown("### 보유 종목 전일 등락률 Heatmap")
             st.caption("사이즈는 원화평가금액, 색상은 최근 거래일 기준 전일 등락률입니다.")
 
             with st.spinner("전일 등락률 계산 중..."):
@@ -1310,7 +1311,7 @@ def render_snapshot_page():
                 if missing_count > 0:
                     st.info(f"{missing_count}개 종목은 가격 데이터 부족으로 전일 등락률이 표시되지 않습니다.")
 
-                st.markdown("#### 📋 전일 등락률 상세")
+                st.markdown("#### 전일 등락률 상세")
                 detail_cols = [
                     "YF_Symbol", "종목명", "섹터", "Weight", "원화평가금액",
                     "전일등락률", "최근거래일", "직전거래일", "최근종가", "직전종가",
@@ -1331,7 +1332,7 @@ def render_snapshot_page():
                 )
 
         with tab_intel:
-            st.markdown("### 🧠 포트폴리오 종목 정보")
+            st.markdown("### 포트폴리오 종목 정보")
             st.caption("기존 포트폴리오 로직은 유지하고, 선택한 보유 종목의 FMP fundamentals, actuals, news, analyst sentiment를 추가로 표시합니다.")
 
             intel_holdings = (
@@ -1679,7 +1680,7 @@ def render_snapshot_page():
                     _render_news_feed("Press Releases", press_releases, "선택한 종목에 대한 보도자료가 없습니다.")
 
         with tab_simulation:
-            st.markdown("### 🔬 포트폴리오 비중 시뮬레이션")
+            st.markdown("### 포트폴리오 비중 시뮬레이션")
             st.caption("기존 종목의 비중을 조절하거나 신규 종목을 추가하여 NAV 변화를 시뮬레이션합니다. (전일 종가 기준)")
 
             # 시뮬레이션 설정
@@ -1690,12 +1691,12 @@ def render_snapshot_page():
 
             with col_sim_settings2:
                 # 추가 현금 투입 옵션
-                use_additional_cash = st.checkbox("💰 추가 현금 투입", value=False,
+                use_additional_cash = st.checkbox("추가 현금 투입", value=False,
                                                   help="비중 상향 시 기존 NAV를 유지하면서 추가 자금을 투입합니다.")
 
             additional_cash_krw = 0
             if use_additional_cash:
-                st.markdown("#### 💵 추가 현금 투입 설정")
+                st.markdown("#### 추가 현금 투입 설정")
 
                 cash_input_col1, cash_input_col2 = st.columns(2)
                 with cash_input_col1:
@@ -1720,7 +1721,7 @@ def render_snapshot_page():
             col_existing, col_new = st.columns(2)
 
             with col_existing:
-                st.markdown("#### 📈 기존 종목 비중 조절")
+                st.markdown("#### 기존 종목 비중 조절")
                 st.caption("비중을 조절할 종목을 선택하고 새로운 비중(%)을 입력하세요.")
 
                 # 기존 종목 리스트 (상위 20개)
@@ -1751,7 +1752,7 @@ def render_snapshot_page():
                         weight_adjustments[ticker] = new_weight / 100  # 비율로 변환
 
             with col_new:
-                st.markdown("#### ➕ 신규 종목 추가")
+                st.markdown("#### 신규 종목 추가")
                 st.caption("추가할 종목 티커, 마켓, 비중(%)을 입력하세요. 최대 30개까지 지원합니다.")
 
                 # 마켓 옵션
@@ -1832,7 +1833,7 @@ def render_snapshot_page():
             st.markdown("---")
 
             # 시뮬레이션 실행 버튼
-            if st.button("🚀 시뮬레이션 실행", type="primary", use_container_width=True):
+            if st.button("시뮬레이션 실행", type="primary", use_container_width=True):
                 if not weight_adjustments and not new_positions and additional_cash_krw == 0:
                     st.warning("비중을 조절하거나 신규 종목을 추가하거나 추가 현금을 투입해주세요.")
                 else:
@@ -1857,10 +1858,10 @@ def render_snapshot_page():
 
                         # 추가 현금 투입 시 안내 메시지
                         if use_additional_cash and additional_cash_krw > 0:
-                            st.info(f"💰 **추가 현금 투입 모드**: 기존 NAV ₩{total_mv:,.0f} + 추가 현금 ₩{additional_cash_krw:,.0f} = 새 NAV ₩{sim_base_nav:,.0f}")
+                            st.info(f"추가 현금 투입 모드: 기존 NAV ₩{total_mv:,.0f} + 추가 현금 ₩{additional_cash_krw:,.0f} = 새 NAV ₩{sim_base_nav:,.0f}")
 
                         # 결과 표시
-                        st.markdown("### 📊 시뮬레이션 결과")
+                        st.markdown("### 시뮬레이션 결과")
 
                         # NAV 비교 차트
                         fig_nav = go.Figure()
@@ -1903,7 +1904,7 @@ def render_snapshot_page():
                         m4.metric("시뮬레이션 수익률", f"{sim_return:.2f}%", delta=f"{return_diff:+.2f}%")
 
                         # 변동성 비교
-                        st.markdown("### 📉 변동성 비교 (30일 기준)")
+                        st.markdown("### 변동성 비교 (30일 기준)")
 
                         with st.spinner("변동성 계산 중..."):
                             orig_vol = calculate_portfolio_volatility(result["original_weights"], lookback_days=30)
@@ -1948,7 +1949,7 @@ def render_snapshot_page():
                             st.warning("변동성을 계산할 수 없습니다.")
 
                         # 비중 변경 요약
-                        st.markdown("### 📋 비중 변경 요약")
+                        st.markdown("### 비중 변경 요약")
 
                         # 변경된 비중 테이블
                         changes = []
@@ -1981,7 +1982,7 @@ def render_snapshot_page():
                             st.info("비중 변경 사항이 없습니다.")
 
                         # 매매 주수 계산
-                        st.markdown("### 🛒 매매 주문 (Trade Orders)")
+                        st.markdown("### 매매 주문 (Trade Orders)")
                         if use_additional_cash and additional_cash_krw > 0:
                             st.caption(f"목표 비중 달성을 위해 매매해야 하는 주수입니다. (새 NAV ₩{sim_base_nav:,.0f} 기준, 각 국가별 최종 영업일 종가)")
                         else:
@@ -2008,7 +2009,7 @@ def render_snapshot_page():
                             col_buy, col_sell = st.columns(2)
 
                             with col_buy:
-                                st.markdown("#### 🟢 매수 주문")
+                                st.markdown("#### 매수 주문")
                                 if not buy_trades.empty:
                                     buy_display = buy_trades[["티커", "종목명", "주수", "현지통화가격", "통화", "매매금액(KRW)"]].copy()
                                     buy_display = buy_display.sort_values("매매금액(KRW)", ascending=False)
@@ -2026,7 +2027,7 @@ def render_snapshot_page():
                                     st.info("매수할 종목이 없습니다.")
 
                             with col_sell:
-                                st.markdown("#### 🔴 매도 주문")
+                                st.markdown("#### 매도 주문")
                                 if not sell_trades.empty:
                                     sell_display = sell_trades[["티커", "종목명", "주수", "현지통화가격", "통화", "매매금액(KRW)"]].copy()
                                     sell_display = sell_display.sort_values("매매금액(KRW)", ascending=False)
@@ -2044,7 +2045,7 @@ def render_snapshot_page():
                                     st.info("매도할 종목이 없습니다.")
 
                             # 전체 매매 상세 테이블
-                            with st.expander("📊 전체 매매 상세 보기"):
+                            with st.expander("전체 매매 상세 보기"):
                                 df_trades_display = df_trades[[
                                     "티커", "종목명", "매매", "주수", "현지통화가격", "통화",
                                     "원래비중", "목표비중", "비중변화", "매매금액(현지)", "매매금액(KRW)"
@@ -2079,7 +2080,7 @@ def render_snapshot_page():
                             st.info("매매할 종목이 없습니다.")
 
                         # 섹터 비중 비교
-                        st.markdown("### 🧭 섹터 비중 비교")
+                        st.markdown("### 섹터 비중 비교")
 
                         sector_map = result.get("sector_map", {})
 
@@ -2165,7 +2166,7 @@ def render_snapshot_page():
                         )
 
                         # 팩터 익스포저
-                        st.markdown("### 📈 팩터 익스포저 (Factor Exposure)")
+                        st.markdown("### 팩터 익스포저 (Factor Exposure)")
                         st.caption("팩터 ETF 대비 베타로 측정한 익스포저입니다.")
 
                         with st.spinner("팩터 익스포저 계산 중..."):

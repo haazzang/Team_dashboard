@@ -1804,7 +1804,7 @@ def get_openai_api_key():
     if openai is None:
         return None
     api_key = st.sidebar.text_input(
-        '🔑 OpenAI API Key',
+        'OpenAI API Key',
         type='password',
         help='Key is used only for report generation. Set OPENAI_API_KEY env/secret or enter here.',
         key='openai_api_key_input',
@@ -1831,7 +1831,7 @@ def get_openai_api_key():
 def get_deepseek_api_key():
     """Resolve DeepSeek API key (sidebar input first)."""
     api_key = st.sidebar.text_input(
-        '🧠 DeepSeek API Key',
+        'DeepSeek API Key',
         type='password',
         help='Key is used only for report generation. Set DEEPSEEK_API_KEY env/secret or enter here.',
         key='deepseek_api_key_input',

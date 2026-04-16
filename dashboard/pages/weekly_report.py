@@ -213,7 +213,7 @@ def _resolve_weekly_report_source(uploaded_file):
     return data_path, data_path.name, "local"
 
 def render_weekly_report_page():
-    st.subheader("📑 Weekly Meeting Report Generator")
+    st.subheader("Weekly Meeting Report Generator")
     uploaded_file_ce = st.sidebar.file_uploader("Optional override upload for report", type=['xlsx'], key="rep")
     data_source, source_label, source_type = _resolve_weekly_report_source(uploaded_file_ce)
 
@@ -370,7 +370,7 @@ def render_weekly_report_page():
                 else: st.write("No data.")
 
         with tabs[0]:
-            st.markdown("### 📝 Weekly Meeting Commentary")
+            st.markdown("### Weekly Meeting Commentary")
             st.caption(
                 "Benchmark and monthly relative tables use FMP daily prices "
                 f"({', '.join(WEEKLY_REPORT_BENCHMARKS.keys())})."
@@ -458,7 +458,7 @@ def render_weekly_report_page():
             
             st.text_area("Copy this:", txt, height=300)
 
-            st.markdown("#### 🤖 AI-Generated Weekly Report")
+            st.markdown("#### AI-Generated Weekly Report")
             llm_choice = st.radio(
                 "Select LLM",
                 ["OpenAI (gpt-4o-mini)", "DeepSeek (deepseek-chat)"],

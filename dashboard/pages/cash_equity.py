@@ -5,7 +5,7 @@ from dashboard.core import *  # noqa: F401,F403
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 def render_cash_equity_page():
-    st.subheader("📈 Cash Equity Portfolio Analysis")
+    st.subheader("Cash Equity Portfolio Analysis")
     uploaded_file_ce = st.sidebar.file_uploader("Upload 'Holdings3.xlsx'", type=['xlsx'], key="ce")
 
     if uploaded_file_ce:
@@ -74,7 +74,7 @@ def render_cash_equity_page():
 
             factor_returns = align_factor_returns(target_ret.index, factor_prices)
 
-            st.markdown("#### 📊 Risk Metrics (Hedged Total Returns)")
+            st.markdown("#### Risk Metrics (Hedged Total Returns)")
             rows = []
             if view_opt == "KRW":
                 port_label = "Portfolio (Hedged, KRW)"
@@ -117,7 +117,7 @@ def render_cash_equity_page():
             t1, t2, t3, t4 = st.tabs(["Factor Risk & Attribution", "Selection Effect", "Holdings", "Beta Trend"])
             
             with t1:
-                st.markdown(f"#### 🧪 {FACTOR_TARGET_COUNT}-Factor Analysis (Risk & Attribution)")
+                st.markdown(f"#### {FACTOR_TARGET_COUNT}-Factor Analysis (Risk & Attribution)")
                 if not factor_returns.empty:
                     exposures, contrib, r2 = perform_factor_regression(target_ret, factor_returns)
                     
@@ -139,7 +139,7 @@ def render_cash_equity_page():
                                         fig_attr.add_trace(go.Scatter(x=contrib_cum.index, y=contrib_cum[col], name=col))
                                 st.plotly_chart(fig_attr, use_container_width=True)
                         
-                        st.markdown("#### 📅 Monthly Factor Attribution")
+                        st.markdown("#### Monthly Factor Attribution")
                         m_contrib = contrib.resample('ME').apply(lambda x: (1+x).prod()-1)
                         m_contrib.index = m_contrib.index.strftime('%Y-%m')
                         fig_heat = go.Figure(data=go.Heatmap(
@@ -153,7 +153,7 @@ def render_cash_equity_page():
                 else: st.warning("Factor data download failed.")
 
             with t2:
-                st.markdown("#### 💹 Return Contribution")
+                st.markdown("#### Return Contribution")
                 if df_contrib:
                     c_a, c_b = st.columns(2)
                     with c_a:
@@ -166,7 +166,7 @@ def render_cash_equity_page():
                             st.plotly_chart(px.bar(sec_cont, x='Contrib_KRW', y='섹터', orientation='h', title="Contribution by Sector", text_auto='.2%'))
                     
                     st.markdown("---")
-                    st.markdown("#### 🥧 Current Allocation Breakdown")
+                    st.markdown("#### Current Allocation Breakdown")
                     if not curr_hold.empty:
                         st.plotly_chart(px.pie(curr_hold, values='원화평가금액', names='섹터', title="Sector Allocation", hole=0.4), use_container_width=True)
                         st.plotly_chart(px.pie(curr_hold, values='원화평가금액', names='Country', title="Country Allocation", hole=0.4), use_container_width=True)
@@ -179,7 +179,7 @@ def render_cash_equity_page():
                 with st.expander("Daily Data"): st.dataframe(df_perf)
 
             with t4:
-                st.markdown("#### 📈 Rolling Beta Trend vs Benchmarks")
+                st.markdown("#### Rolling Beta Trend vs Benchmarks")
                 if bm_returns.empty:
                     st.warning("Benchmark data download failed.")
                 else:
@@ -204,7 +204,7 @@ def render_cash_equity_page():
                     else:
                         st.write("Insufficient data to compute rolling beta.")
 
-                st.markdown("#### 🧮 Holdings-Weighted Beta (Latest)")
+                st.markdown("#### Holdings-Weighted Beta (Latest)")
                 bench_yf_map = {"S&P 500": "^GSPC", "Hang Seng": "^HSI", "Nikkei 225": "^N225", "KOSPI": "^KS11"}
                 holdings_beta = calculate_holdings_beta(curr_hold, bench_yf_map, end_date=max_date)
                 if holdings_beta:

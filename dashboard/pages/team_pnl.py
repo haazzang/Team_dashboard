@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from dashboard.core import *  # noqa: F401,F403
+from dashboard.core import _find_file_by_name, _resolve_normalized_path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 def render_team_pnl_page():
-    st.subheader("📊 Total Team Portfolio Dashboard")
+    st.subheader("Total Team Portfolio Dashboard")
     uploaded_file = st.sidebar.file_uploader("Upload 'Team_PNL.xlsx'", type=['xlsx'], key="pnl")
 
     pnl_file = uploaded_file
@@ -50,7 +51,7 @@ def render_team_pnl_page():
             df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
             
-            t1, t2, t3, t4, t5 = st.tabs(["📈 Chart", "📊 Analysis", "🔗 Correlation", "🌍 Cross Asset", "🧪 Simulation"])
+            t1, t2, t3, t4, t5 = st.tabs(["Chart", "Analysis", "Correlation", "Cross Asset", "Simulation"])
             
             with t1:
                 strat = st.selectbox("Select Strategy", df_user_ret.columns)
