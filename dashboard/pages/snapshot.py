@@ -1719,7 +1719,7 @@ def render_snapshot_page():
 
             with col_new:
                 st.markdown("#### ➕ 신규 종목 추가")
-                st.caption("추가할 종목 티커, 마켓, 비중(%)을 입력하세요.")
+                st.caption("추가할 종목 티커, 마켓, 비중(%)을 입력하세요. 최대 30개까지 지원합니다.")
 
                 # 마켓 옵션
                 market_options = {
@@ -1729,9 +1729,19 @@ def render_snapshot_page():
                     "KR": "한국 (.KS)"
                 }
 
-                # 신규 종목 입력 (최대 5개)
+                new_position_slots = st.slider(
+                    "신규 종목 입력 개수",
+                    min_value=1,
+                    max_value=30,
+                    value=5,
+                    step=1,
+                    key="simulation_new_position_slots",
+                    help="포트폴리오 시뮬레이션에 추가할 신규 종목 입력 칸 수를 선택합니다.",
+                )
+
+                # 신규 종목 입력 (최대 30개)
                 new_positions = []
-                for i in range(5):
+                for i in range(new_position_slots):
                     c1, c2, c3 = st.columns([2, 1, 1])
                     with c1:
                         new_ticker_raw = st.text_input(
