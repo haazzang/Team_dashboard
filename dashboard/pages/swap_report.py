@@ -5,7 +5,7 @@ from dashboard.core import *  # noqa: F401,F403
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 def render_swap_report_page():
-    st.subheader("📊 Swap Report Analysis (JMLNKWGE)")
+    st.subheader("Swap Report Analysis (JMLNKWGE)")
 
     # SQLite DB 경로 - 여러 경로 시도
     possible_paths = [
@@ -73,7 +73,7 @@ def render_swap_report_page():
 
         # 수동 업로드 옵션
         st.markdown("---")
-        st.markdown("### 📤 수동 업로드")
+        st.markdown("### 수동 업로드")
         uploaded_file = st.file_uploader("Swap Report Excel 파일 업로드", type=['xlsx'])
 
         if uploaded_file:
@@ -99,7 +99,7 @@ def render_swap_report_page():
 
         # 탭 생성
         tab_overview, tab_holdings, tab_pnl, tab_attribution = st.tabs([
-            "📈 Overview", "📋 Holdings", "💰 P&L Analysis", "🎯 Attribution"
+            "Overview", "Holdings", "P&L Analysis", "Attribution"
         ])
 
         with tab_overview:
@@ -135,7 +135,7 @@ def render_swap_report_page():
                 col_top, col_bottom = st.columns(2)
 
                 with col_top:
-                    st.markdown("#### 🟢 Top 5 Performers")
+                    st.markdown("#### Top 5 Performers")
                     top5 = df_date_underlying.nlargest(5, 'pnl_usd')[['ticker', 'name', 'pnl_usd', 'pnl_pct', 'contribution']]
                     st.dataframe(top5.style.format({
                         'pnl_usd': '${:,.0f}',
@@ -144,7 +144,7 @@ def render_swap_report_page():
                     }))
 
                 with col_bottom:
-                    st.markdown("#### 🔴 Bottom 5 Performers")
+                    st.markdown("#### Bottom 5 Performers")
                     bottom5 = df_date_underlying.nsmallest(5, 'pnl_usd')[['ticker', 'name', 'pnl_usd', 'pnl_pct', 'contribution']]
                     st.dataframe(bottom5.style.format({
                         'pnl_usd': '${:,.0f}',
