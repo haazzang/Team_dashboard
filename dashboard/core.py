@@ -1029,7 +1029,16 @@ def fetch_prev_day_returns(tickers):
 
     return pd.DataFrame(rows, columns=output_cols)
 
-def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_nav, simulation_days=30, additional_cash=0, original_nav=None):
+def simulate_portfolio_nav(
+    holdings_df,
+    weight_adjustments,
+    new_positions,
+    base_nav,
+    simulation_days=30,
+    additional_cash=0,
+    original_nav=None,
+    nav_adjustment_pct=0,
+):
     """
     포트폴리오 시뮬레이션 수행
 
@@ -1041,6 +1050,7 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
         simulation_days: 시뮬레이션 기간 (일)
         additional_cash: 추가 투입 현금 (원화)
         original_nav: 원래 NAV (추가 현금 미포함)
+        nav_adjustment_pct: 전체 NAV 조절 비율 (%)
 
     Returns:
         dict with simulation results
@@ -1156,6 +1166,8 @@ def simulate_portfolio_nav(holdings_df, weight_adjustments, new_positions, base_
         "additional_cash": additional_cash,
         "base_nav": base_nav,
         "original_nav_value": original_nav,
+        "nav_adjustment_pct": nav_adjustment_pct,
+        "nav_change_krw": base_nav - original_nav,
     }
 
 def calculate_factor_exposure(weights, returns, simulation_days=30):
@@ -1474,15 +1486,11 @@ def calculate_trade_shares(original_weights, sim_weights, total_nav_krw, holding
         # USD/KRW 환율
         usd_krw = fx_rates.get("KRW", 1400.0)
 
-        # 목표 금액 변화 계산 (추가 현금 고려)
-        if additional_cash > 0:
-            # 추가 현금 모드: 원래 금액과 목표 금액의 차이 계산
-            original_value_krw = orig_w * original_nav  # 기존 보유 금액
-            target_value_krw = sim_w * total_nav_krw    # 목표 금액 (새 NAV 기준)
-            target_value_change_krw = target_value_krw - original_value_krw
-        else:
-            # 일반 모드: 비중 차이로 계산
-            target_value_change_krw = (sim_w - orig_w) * total_nav_krw
+        # 목표 금액 변화 계산:
+        # 총 NAV 증감, 비중 변경, 신규 종목 추가를 모두 동일한 방식으로 처리한다.
+        original_value_krw = orig_w * original_nav
+        target_value_krw = sim_w * total_nav_krw
+        target_value_change_krw = target_value_krw - original_value_krw
 
         if abs(target_value_change_krw) < 1000:  # 1000원 미만 변화는 무시
             continue

@@ -1684,7 +1684,7 @@ def render_snapshot_page():
             st.caption("기존 종목의 비중을 조절하거나 신규 종목을 추가하여 NAV 변화를 시뮬레이션합니다. (전일 종가 기준)")
 
             # 시뮬레이션 설정
-            col_sim_settings1, col_sim_settings2 = st.columns(2)
+            col_sim_settings1, col_sim_settings2, col_sim_settings3 = st.columns(3)
 
             with col_sim_settings1:
                 sim_days = st.slider("시뮬레이션 기간 (일)", min_value=5, max_value=90, value=30, step=5)
@@ -1693,6 +1693,17 @@ def render_snapshot_page():
                 # 추가 현금 투입 옵션
                 use_additional_cash = st.checkbox("추가 현금 투입", value=False,
                                                   help="비중 상향 시 기존 NAV를 유지하면서 추가 자금을 투입합니다.")
+
+            with col_sim_settings3:
+                nav_adjustment_pct = st.number_input(
+                    "NAV 비율 조절 (%)",
+                    min_value=-95.0,
+                    max_value=300.0,
+                    value=0.0,
+                    step=5.0,
+                    format="%.1f",
+                    help="예: -30이면 전체 NAV를 30% 축소, +30이면 30% 확대합니다.",
+                )
 
             additional_cash_krw = 0
             if use_additional_cash:
@@ -1714,6 +1725,15 @@ def render_snapshot_page():
                         new_total_nav = total_mv + additional_cash_krw
                         st.metric("새로운 총 NAV", f"₩{new_total_nav:,.0f}")
                         st.caption(f"기존 NAV: ₩{total_mv:,.0f} + 추가: ₩{additional_cash_krw:,.0f}")
+
+            nav_scale_factor = 1 + nav_adjustment_pct / 100.0
+            nav_scale_delta_krw = total_mv * (nav_scale_factor - 1)
+            if abs(nav_adjustment_pct) > 0:
+                st.markdown("#### NAV 비율 조절")
+                n1, n2, n3 = st.columns(3)
+                n1.metric("NAV 조절 비율", f"{nav_adjustment_pct:+.1f}%")
+                n2.metric("NAV 조절 금액", f"₩{nav_scale_delta_krw:,.0f}")
+                n3.metric("비율 조절 후 NAV", f"₩{(total_mv * nav_scale_factor):,.0f}")
 
             st.markdown("---")
 
@@ -1834,11 +1854,14 @@ def render_snapshot_page():
 
             # 시뮬레이션 실행 버튼
             if st.button("시뮬레이션 실행", type="primary", use_container_width=True):
-                if not weight_adjustments and not new_positions and additional_cash_krw == 0:
-                    st.warning("비중을 조절하거나 신규 종목을 추가하거나 추가 현금을 투입해주세요.")
+                if not weight_adjustments and not new_positions and additional_cash_krw == 0 and abs(nav_adjustment_pct) < 0.001:
+                    st.warning("비중 조절, 신규 종목 추가, NAV 비율 조절, 추가 현금 투입 중 하나 이상을 입력해주세요.")
                 else:
-                    # 시뮬레이션 NAV 결정 (추가 현금 포함 여부)
-                    sim_base_nav = total_mv + additional_cash_krw if use_additional_cash else total_mv
+                    # 시뮬레이션 NAV 결정 (NAV 비율 조절 + 추가 현금 반영)
+                    sim_base_nav = (total_mv * nav_scale_factor) + (additional_cash_krw if use_additional_cash else 0)
+                    if sim_base_nav <= 0:
+                        st.error("시뮬레이션 NAV가 0 이하입니다. NAV 비율 조절 또는 추가 현금 입력값을 다시 확인하세요.")
+                        st.stop()
 
                     with st.spinner("시뮬레이션 실행 중..."):
                         result = simulate_portfolio_nav(
@@ -1848,7 +1871,8 @@ def render_snapshot_page():
                             base_nav=sim_base_nav,
                             simulation_days=sim_days,
                             additional_cash=additional_cash_krw if use_additional_cash else 0,
-                            original_nav=total_mv
+                            original_nav=total_mv,
+                            nav_adjustment_pct=nav_adjustment_pct,
                         )
 
                     if result is None:
@@ -1859,6 +1883,19 @@ def render_snapshot_page():
                         # 추가 현금 투입 시 안내 메시지
                         if use_additional_cash and additional_cash_krw > 0:
                             st.info(f"추가 현금 투입 모드: 기존 NAV ₩{total_mv:,.0f} + 추가 현금 ₩{additional_cash_krw:,.0f} = 새 NAV ₩{sim_base_nav:,.0f}")
+                        if abs(nav_adjustment_pct) > 0:
+                            nav_action = "매수" if nav_adjustment_pct > 0 else "매도"
+                            nav_only_mode = not weight_adjustments and not new_positions and additional_cash_krw == 0
+                            if nav_only_mode:
+                                st.info(
+                                    f"NAV 조절 전용 모드: 전체 NAV를 {nav_adjustment_pct:+.1f}% 조정하므로 "
+                                    f"기존 보유 종목을 동일 비율로 {abs(nav_adjustment_pct):.1f}%씩 {nav_action}합니다."
+                                )
+                            else:
+                                st.info(
+                                    f"전체 NAV 조절 {nav_adjustment_pct:+.1f}%가 다른 비중 조정과 함께 반영됩니다. "
+                                    f"최종 목표 NAV는 ₩{sim_base_nav:,.0f}입니다."
+                                )
 
                         # 결과 표시
                         st.markdown("### 시뮬레이션 결과")
@@ -1979,7 +2016,10 @@ def render_snapshot_page():
                                 use_container_width=True
                             )
                         else:
-                            st.info("비중 변경 사항이 없습니다.")
+                            if abs(nav_adjustment_pct) > 0:
+                                st.info("비중은 동일하고 총 NAV만 조절되었습니다. 실제 매매 방향과 수량은 아래 주문 표에서 확인할 수 있습니다.")
+                            else:
+                                st.info("비중 변경 사항이 없습니다.")
 
                         # 매매 주수 계산
                         st.markdown("### 매매 주문 (Trade Orders)")
@@ -2005,6 +2045,11 @@ def render_snapshot_page():
                             # 매수/매도 분리
                             buy_trades = df_trades[df_trades["매매"] == "매수"].copy()
                             sell_trades = df_trades[df_trades["매매"] == "매도"].copy()
+                            summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+                            summary_col1.metric("매수 종목 수", f"{len(buy_trades):,}")
+                            summary_col2.metric("매도 종목 수", f"{len(sell_trades):,}")
+                            summary_col3.metric("총 주문 종목 수", f"{len(df_trades):,}")
+                            summary_col4.metric("목표 NAV", f"₩{sim_base_nav:,.0f}", delta=f"{sim_base_nav - total_mv:+,.0f}")
 
                             col_buy, col_sell = st.columns(2)
 
