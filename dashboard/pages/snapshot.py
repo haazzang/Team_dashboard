@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 from dashboard.core import *  # noqa: F401,F403
-from dashboard.core import _find_file_by_name, _normalize_filename, _resolve_normalized_path
+from dashboard.core import _clean_symbol, _find_file_by_name, _normalize_filename, _resolve_normalized_path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SNAPSHOT_AUTO_REFRESH_SECONDS = 2
