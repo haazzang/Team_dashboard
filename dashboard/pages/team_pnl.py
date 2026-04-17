@@ -47,9 +47,8 @@ def render_team_pnl_page():
             df_pnl = df_pnl.loc[common_idx, common_cols]
             df_pos = df_pos.loc[common_idx, common_cols]
             
-            df_cum_pnl = df_pnl.cumsum()
-            df_user_ret = df_cum_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
-            df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan)).fillna(0)
+            df_daily_ret = df_pnl.div(df_pos.replace(0, np.nan))
+            df_user_ret = (1 + df_daily_ret.fillna(0)).cumprod() - 1
             
             t1, t2, t3, t4, t5 = st.tabs(["Chart", "Analysis", "Correlation", "Cross Asset", "Simulation"])
             
@@ -78,7 +77,8 @@ def render_team_pnl_page():
                 gl = df_daily_ret[df_daily_ret < 0].sum().abs()
                 stats['Profit Factor'] = (gp / gl).fillna(0)
                 
-                stats['MDD'] = ((1+df_daily_ret).cumprod() / (1+df_daily_ret).cumprod().cummax() - 1).min()
+                _cum = (1 + df_daily_ret.fillna(0)).cumprod()
+                stats['MDD'] = (_cum / _cum.cummax() - 1).min()
                 stats['Total Return'] = df_user_ret.iloc[-1]
                 
                 disp = stats.copy()
