@@ -167,6 +167,53 @@ def _format_timestamp(value):
         pass
     return parsed.strftime("%Y-%m-%d %H:%M")
 
+def _to_csv_bytes(df):
+    if df is None:
+        return b""
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+def _to_emsx_ticker(ticker):
+    sym = _clean_symbol(ticker)
+    if not sym:
+        return ""
+
+    text = str(sym).strip()
+    if text.upper().endswith(" EQUITY"):
+        return text
+
+    if text.endswith(".HK"):
+        return f"{text[:-3].zfill(4)} HK Equity"
+    if text.endswith(".T"):
+        return f"{text[:-2]} JP Equity"
+    if text.endswith(".KS"):
+        return f"{text[:-3]} KS Equity"
+    if text.endswith(".KQ"):
+        return f"{text[:-3]} KQ Equity"
+
+    return f"{text.replace('-', '/')} US Equity"
+
+def _build_emsx_upload_df(df_trades, broker_code="", account_code="", order_type="MKT", tif="DAY", hand_instruction="ANY"):
+    if df_trades is None or df_trades.empty:
+        return pd.DataFrame()
+
+    normalized_order_type = str(order_type).strip().upper()
+    emsx_df = pd.DataFrame({
+        "EMSX_TICKER": df_trades["티커"].apply(_to_emsx_ticker),
+        "EMSX_AMOUNT": pd.to_numeric(df_trades["주수"], errors="coerce").fillna(0).round().astype(int),
+        "EMSX_ORDER_TYPE": normalized_order_type,
+        "EMSX_BROKER": str(broker_code).strip().upper(),
+        "EMSX_TIF": str(tif).strip().upper(),
+        "EMSX_HAND_INSTRUCTION": str(hand_instruction).strip().upper(),
+        "EMSX_SIDE": df_trades["매매"].map({"매수": "BUY", "매도": "SELL"}).fillna(""),
+        "EMSX_ACCOUNT": str(account_code).strip(),
+    })
+    if normalized_order_type == "LMT":
+        emsx_df["EMSX_LIMIT_PRICE"] = pd.to_numeric(df_trades["현지통화가격"], errors="coerce").round(4)
+
+    emsx_df = emsx_df[emsx_df["EMSX_TICKER"] != ""].copy()
+    emsx_df = emsx_df[emsx_df["EMSX_AMOUNT"] > 0].reset_index(drop=True)
+    return emsx_df
+
 def _sentiment_label(score):
     value = _coerce_float(score)
     if value is None:
@@ -2041,6 +2088,11 @@ def render_snapshot_page():
 
                         if trades:
                             df_trades = pd.DataFrame(trades)
+                            df_trades_display = df_trades[[
+                                "티커", "종목명", "매매", "주수", "현지통화가격", "통화",
+                                "원래비중", "목표비중", "비중변화", "매매금액(현지)", "매매금액(KRW)"
+                            ]].copy()
+                            df_trades_display = df_trades_display.sort_values("매매금액(KRW)", ascending=False)
 
                             # 매수/매도 분리
                             buy_trades = df_trades[df_trades["매매"] == "매수"].copy()
@@ -2050,6 +2102,82 @@ def render_snapshot_page():
                             summary_col2.metric("매도 종목 수", f"{len(sell_trades):,}")
                             summary_col3.metric("총 주문 종목 수", f"{len(df_trades):,}")
                             summary_col4.metric("목표 NAV", f"₩{sim_base_nav:,.0f}", delta=f"{sim_base_nav - total_mv:+,.0f}")
+
+                            st.markdown("#### 주문 파일 다운로드")
+                            st.caption("원본 주문 상세 CSV와 EMSX 업로드용 CSV를 내려받을 수 있습니다.")
+
+                            emsx_setting_col1, emsx_setting_col2, emsx_setting_col3, emsx_setting_col4 = st.columns(4)
+                            with emsx_setting_col1:
+                                emsx_broker = st.text_input(
+                                    "EMSX Broker",
+                                    value="",
+                                    key="simulation_emsx_broker",
+                                    help="예: BB. 브로커 코드가 필요하면 입력하세요.",
+                                )
+                            with emsx_setting_col2:
+                                emsx_account = st.text_input(
+                                    "EMSX Account",
+                                    value="",
+                                    key="simulation_emsx_account",
+                                    help="브로커/라우팅 계정이 필요하면 입력하세요.",
+                                )
+                            with emsx_setting_col3:
+                                emsx_order_type = st.selectbox(
+                                    "EMSX Order Type",
+                                    options=["MKT", "LMT", "MOC", "LOC", "VWAP"],
+                                    index=0,
+                                    key="simulation_emsx_order_type",
+                                )
+                            with emsx_setting_col4:
+                                emsx_tif = st.selectbox(
+                                    "EMSX TIF",
+                                    options=["DAY", "GTC", "IOC", "FOK", "OPG", "GTX"],
+                                    index=0,
+                                    key="simulation_emsx_tif",
+                                )
+
+                            emsx_hand_instruction = st.text_input(
+                                "EMSX Handling Instruction",
+                                value="ANY",
+                                key="simulation_emsx_hand_instruction",
+                                help="기본값은 ANY입니다. 브로커별 커스텀 값이 필요하면 수정하세요.",
+                            )
+
+                            emsx_df = _build_emsx_upload_df(
+                                df_trades,
+                                broker_code=emsx_broker,
+                                account_code=emsx_account,
+                                order_type=emsx_order_type,
+                                tif=emsx_tif,
+                                hand_instruction=emsx_hand_instruction,
+                            )
+                            export_stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+                            download_col1, download_col2 = st.columns(2)
+                            with download_col1:
+                                st.download_button(
+                                    "전체 매매 상세 CSV 다운로드",
+                                    data=_to_csv_bytes(df_trades_display),
+                                    file_name=f"simulation_trade_details_{export_stamp}.csv",
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                    key=f"simulation_trade_details_download_{export_stamp}",
+                                )
+                            with download_col2:
+                                st.download_button(
+                                    "EMSX 업로드 CSV 다운로드",
+                                    data=_to_csv_bytes(emsx_df),
+                                    file_name=f"simulation_emsx_upload_{export_stamp}.csv",
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                    key=f"simulation_emsx_download_{export_stamp}",
+                                )
+
+                            if not emsx_broker or not emsx_account:
+                                st.caption("EMSX 업로드 전 브로커 코드와 계정이 필요할 수 있습니다. 비어 있으면 CSV에 공란으로 저장됩니다.")
+                            if emsx_order_type == "LMT":
+                                st.caption("LMT 선택 시 `EMSX_LIMIT_PRICE`는 현재 현지 가격으로 채워집니다. 업로드 전 가격을 다시 확인하세요.")
+                            st.caption("EMSX CSV는 표준 `EMSX_*` 주문 필드 기준으로 생성됩니다.")
 
                             col_buy, col_sell = st.columns(2)
 
@@ -2091,12 +2219,6 @@ def render_snapshot_page():
 
                             # 전체 매매 상세 테이블
                             with st.expander("전체 매매 상세 보기"):
-                                df_trades_display = df_trades[[
-                                    "티커", "종목명", "매매", "주수", "현지통화가격", "통화",
-                                    "원래비중", "목표비중", "비중변화", "매매금액(현지)", "매매금액(KRW)"
-                                ]].copy()
-                                df_trades_display = df_trades_display.sort_values("매매금액(KRW)", ascending=False)
-
                                 st.dataframe(
                                     df_trades_display.style.format({
                                         "주수": "{:,.0f}",
