@@ -11,3 +11,11 @@ token.json
 
 # Swap Report data (downloaded Excel files - too large)
 swap_reports/
+
+# JMLNKWGE swap reports — pulled on demand from Gmail
+pnl_report/reports/*.xlsx
+pnl_report/reports/*.xlsm
+pnl_report/reports/*.csv
+
+# Streamlit secrets
+.streamlit/secrets.toml

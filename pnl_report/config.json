@@ -1,0 +1,40 @@
+{
+  "email": {
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "mailbox": "INBOX",
+    "imap_user_env": "GMAIL_USER",
+    "imap_password_env": "GMAIL_APP_PASSWORD",
+    "subject": "JMLNKWGE Synthetic Portfolio EOD Report",
+    "since": "2026-05-14",
+    "download_dir": "reports"
+  },
+  "pair": {
+    "short_start_date": "2026-05-13",
+    "component_sheet": "component underlyings",
+    "und_sheet": "und",
+    "short_ticker_country_suffix": "US",
+    "short_price_scale": 1.0,
+    "smt_ticker": "SMT LN",
+    "smt_initial_price": 1433.5082,
+    "smt_shares": 154699,
+    "smt_price_scale": 100.0,
+    "currency": "USD"
+  },
+  "market_data": {
+    "provider": "fmp",
+    "fallback_provider": "yahoo",
+    "fmp_api_key_env": "FMP_API_KEY",
+    "smt_symbol": "SMT.L",
+    "yahoo_symbol": "SMT.L",
+    "required": true
+  },
+  "telegram": {
+    "bot_token_env": "TELEGRAM_BOT_TOKEN",
+    "chat_id_env": "TELEGRAM_CHAT_ID"
+  },
+  "outputs": {
+    "dir": "outputs",
+    "csv": "pair_pnl.csv"
+  }
+}

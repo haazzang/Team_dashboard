@@ -1,0 +1,202 @@
+[
+  {
+    "valuation_date": "2026-04-20",
+    "announcement_date": "2026-04-21",
+    "announcement_time": "11:38 AM",
+    "cum_par": 1352.84,
+    "cum_fair": 1385.35,
+    "ex_par": 1351.67,
+    "ex_fair": 1384.19,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9530788"
+  },
+  {
+    "valuation_date": "2026-04-21",
+    "announcement_date": "2026-04-22",
+    "announcement_time": "11:38 AM",
+    "cum_par": 1347.43,
+    "cum_fair": 1379.93,
+    "ex_par": 1346.18,
+    "ex_fair": 1378.69,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9533029"
+  },
+  {
+    "valuation_date": "2026-04-22",
+    "announcement_date": "2026-04-23",
+    "announcement_time": "12:09 PM",
+    "cum_par": 1352.03,
+    "cum_fair": 1384.51,
+    "ex_par": 1350.38,
+    "ex_fair": 1382.87,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9535325"
+  },
+  {
+    "valuation_date": "2026-04-23",
+    "announcement_date": "2026-04-24",
+    "announcement_time": "12:11 PM",
+    "cum_par": 1330.72,
+    "cum_fair": 1363.82,
+    "ex_par": 1329.08,
+    "ex_fair": 1362.17,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9537526"
+  },
+  {
+    "valuation_date": "2026-04-24",
+    "announcement_date": "2026-04-27",
+    "announcement_time": "12:26 PM",
+    "cum_par": 1367.99,
+    "cum_fair": 1401.09,
+    "ex_par": 1366.26,
+    "ex_fair": 1399.36,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9539864"
+  },
+  {
+    "valuation_date": "2026-04-27",
+    "announcement_date": "2026-04-28",
+    "announcement_time": "11:42 AM",
+    "cum_par": 1368.18,
+    "cum_fair": 1401.25,
+    "ex_par": 1366.45,
+    "ex_fair": 1399.51,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9542121"
+  },
+  {
+    "valuation_date": "2026-04-28",
+    "announcement_date": "2026-04-29",
+    "announcement_time": "11:21 AM",
+    "cum_par": 1353.99,
+    "cum_fair": 1387.09,
+    "ex_par": 1352.26,
+    "ex_fair": 1385.36,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9544472"
+  },
+  {
+    "valuation_date": "2026-04-29",
+    "announcement_date": "2026-04-30",
+    "announcement_time": "11:23 AM",
+    "cum_par": 1348.68,
+    "cum_fair": 1381.78,
+    "ex_par": 1346.74,
+    "ex_fair": 1379.84,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9546920"
+  },
+  {
+    "valuation_date": "2026-04-30",
+    "announcement_date": "2026-05-01",
+    "announcement_time": "02:50 PM",
+    "cum_par": 1342.56,
+    "cum_fair": 1376.21,
+    "ex_par": 1340.77,
+    "ex_fair": 1374.41,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9549842"
+  },
+  {
+    "valuation_date": "2026-05-01",
+    "announcement_date": "2026-05-05",
+    "announcement_time": "08:38 AM",
+    "cum_par": 1346.66,
+    "cum_fair": 1380.28,
+    "ex_par": 1344.86,
+    "ex_fair": 1378.49,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9552166"
+  },
+  {
+    "valuation_date": "2026-05-04",
+    "announcement_date": "2026-05-05",
+    "announcement_time": "11:38 AM",
+    "cum_par": 1361.44,
+    "cum_fair": 1395.11,
+    "ex_par": 1359.64,
+    "ex_fair": 1393.32,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9552786"
+  },
+  {
+    "valuation_date": "2026-05-05",
+    "announcement_date": "2026-05-06",
+    "announcement_time": "11:38 AM",
+    "cum_par": 1351.47,
+    "cum_fair": 1385.09,
+    "ex_par": 1349.68,
+    "ex_fair": 1383.3,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9555021"
+  },
+  {
+    "valuation_date": "2026-05-06",
+    "announcement_date": "2026-05-07",
+    "announcement_time": "12:08 PM",
+    "cum_par": 1366.74,
+    "cum_fair": 1400.29,
+    "ex_par": 1364.95,
+    "ex_fair": 1398.5,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9557406"
+  },
+  {
+    "valuation_date": "2026-05-07",
+    "announcement_date": "2026-05-08",
+    "announcement_time": "11:59 AM",
+    "cum_par": 1372.83,
+    "cum_fair": 1406.48,
+    "ex_par": 1371.05,
+    "ex_fair": 1404.7,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9559766"
+  },
+  {
+    "valuation_date": "2026-05-08",
+    "announcement_date": "2026-05-11",
+    "announcement_time": "11:13 AM",
+    "cum_par": 1356.28,
+    "cum_fair": 1389.86,
+    "ex_par": 1354.53,
+    "ex_fair": 1388.11,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9561864"
+  },
+  {
+    "valuation_date": "2026-05-11",
+    "announcement_date": "2026-05-12",
+    "announcement_time": "12:25 PM",
+    "cum_par": 1346.43,
+    "cum_fair": 1379.99,
+    "ex_par": 1344.68,
+    "ex_fair": 1378.24,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9564423"
+  },
+  {
+    "valuation_date": "2026-05-12",
+    "announcement_date": "2026-05-13",
+    "announcement_time": "11:47 AM",
+    "cum_par": 1353.38,
+    "cum_fair": 1387.0,
+    "ex_par": 1351.63,
+    "ex_fair": 1385.25,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9566587"
+  },
+  {
+    "valuation_date": "2026-05-13",
+    "announcement_date": "2026-05-14",
+    "announcement_time": "11:45 AM",
+    "cum_par": 1358.95,
+    "cum_fair": 1392.54,
+    "ex_par": 1357.2,
+    "ex_fair": 1390.78,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9568906"
+  },
+  {
+    "valuation_date": "2026-05-14",
+    "announcement_date": "2026-05-15",
+    "announcement_time": "11:39 AM",
+    "cum_par": 1370.07,
+    "cum_fair": 1403.63,
+    "ex_par": 1368.32,
+    "ex_fair": 1401.88,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9571187"
+  },
+  {
+    "valuation_date": "2026-05-15",
+    "announcement_date": "2026-05-18",
+    "announcement_time": "11:47 AM",
+    "cum_par": 1366.71,
+    "cum_fair": 1400.36,
+    "ex_par": 1364.96,
+    "ex_fair": 1398.61,
+    "source_url": "https://www.investegate.co.uk/announcement/rns/scottish-mortgage-inv-trust--smt/net-asset-value-s-/9573471"
+  }
+]
