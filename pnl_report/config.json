@@ -16,6 +16,24 @@
     "short_ticker_country_suffix": "US",
     "short_price_scale": 1.0,
     "smt_ticker": "SMT LN",
+    "include_swap_report_smt_long": true,
+    "smt_otc_trs": {
+      "counterparty": "JPM CBNA London Branch",
+      "account": "Kiwoom",
+      "trade_date": "2026-05-14",
+      "effective_date": "2026-05-15",
+      "termination_date": "2026-07-15",
+      "shares": 154699,
+      "initial_gross_price_pence": 1433.5082,
+      "initial_fx_gbpusd": 1.3515,
+      "initial_net_price_usd": 19.3925,
+      "target_notional_usd": 3000000.0,
+      "commission_in_bps": 10,
+      "commission_out_bps": 10,
+      "financing_spread_bps": 75,
+      "financing_base": "SOFR",
+      "financing_day_count": 360
+    },
     "smt_initial_price": 1433.5082,
     "smt_shares": 154699,
     "smt_price_scale": 100.0,
@@ -27,7 +45,8 @@
     "fmp_api_key_env": "FMP_API_KEY",
     "smt_symbol": "SMT.L",
     "yahoo_symbol": "SMT.L",
-    "required": true
+    "gbpusd_symbol": "GBPUSD=X",
+    "required": false
   },
   "telegram": {
     "bot_token_env": "TELEGRAM_BOT_TOKEN",

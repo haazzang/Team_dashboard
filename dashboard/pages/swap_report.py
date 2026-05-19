@@ -263,23 +263,71 @@ def _render_long_short_pair_section():
     df_view["daily_pair_pnl_change"] = df_view["pair_pnl"].diff().fillna(df_view["pair_pnl"])
 
     latest = df_view.iloc[-1]
+    otc_cfg = config.get("pair", {}).get("smt_otc_trs", {})
+    with st.expander("SMT OTC TRS — term sheet"):
+        cols = st.columns(3)
+        cols[0].markdown(
+            f"**Counterparty**  {otc_cfg.get('counterparty', 'n/a')}  \n"
+            f"**Account**  {otc_cfg.get('account', 'n/a')}  \n"
+            f"**Trade Date**  {otc_cfg.get('trade_date', 'n/a')}  \n"
+            f"**Effective**  {otc_cfg.get('effective_date', 'n/a')}  \n"
+            f"**Termination**  {otc_cfg.get('termination_date', 'n/a')}"
+        )
+        cols[1].markdown(
+            f"**Shares**  {int(otc_cfg.get('shares', 0)):,}  \n"
+            f"**Initial Gross**  {otc_cfg.get('initial_gross_price_pence', 0):,.4f}p  \n"
+            f"**Initial FX**  {otc_cfg.get('initial_fx_gbpusd', 0):.4f}  \n"
+            f"**Initial Net USD**  ${otc_cfg.get('initial_net_price_usd', 0):.4f}  \n"
+            f"**Notional**  ${otc_cfg.get('target_notional_usd', 0):,.0f}"
+        )
+        cols[2].markdown(
+            f"**Financing**  {otc_cfg.get('financing_base', 'n/a')} "
+            f"+ {otc_cfg.get('financing_spread_bps', 0)}bps  \n"
+            f"**Day Count**  {otc_cfg.get('financing_day_count', 360)}  \n"
+            f"**Commission In/Out**  "
+            f"{otc_cfg.get('commission_in_bps', 0)}bps / {otc_cfg.get('commission_out_bps', 0)}bps  \n"
+        )
+
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Report Date", latest["report_date"].strftime("%Y-%m-%d"))
     m2.metric("Short Basket PnL", f"${latest['short_pnl']:,.0f}")
     smt_pnl_value = latest["smt_pnl"]
     m3.metric(
-        "SMT LN PnL",
+        "SMT LN PnL (combined)",
         f"${smt_pnl_value:,.0f}" if pd.notna(smt_pnl_value) else "n/a",
     )
     m4.metric("Pair PnL", f"${latest['pair_pnl']:,.0f}")
     m5.metric("Daily Change", f"${latest['daily_pair_pnl_change']:,.0f}")
 
+    s1, s2, s3 = st.columns(3)
+    s1.metric(
+        "→ OTC TRS leg",
+        f"${latest['smt_otc_pnl']:,.0f}" if pd.notna(latest["smt_otc_pnl"]) else "n/a",
+        help="Long SMT LN via JPM CBNA — 154,699 shares, FX-linked TRS.",
+    )
+    s2.metric(
+        "→ Swap-report SMT long",
+        f"${latest['smt_swap_long_pnl']:,.0f}",
+        delta=f"{int(latest['smt_swap_long_quantity']):,} shares",
+        help="Long SMT LN positions sitting inside the JMLNKWGE swap report (positive quantity).",
+    )
+    s3.metric(
+        "→ FX (GBPUSD)",
+        f"{latest['smt_otc_current_fx']:.4f}" if pd.notna(latest["smt_otc_current_fx"]) else "n/a",
+        delta=(
+            f"{(latest['smt_otc_current_fx'] - otc_cfg.get('initial_fx_gbpusd', 0)):.4f} vs initial"
+            if pd.notna(latest["smt_otc_current_fx"]) and otc_cfg.get("initial_fx_gbpusd") else None
+        ),
+    )
+
     smt_price = latest.get("smt_current_price")
     smt_source = latest.get("smt_price_source")
+    smt_usd = latest.get("smt_otc_current_usd_price")
     st.caption(
-        f"Short names today: {int(latest['short_count'])}  |  "
-        f"SMT price: {smt_price if pd.notna(smt_price) else 'n/a'} "
-        f"({smt_source if pd.notna(smt_source) else 'n/a'})"
+        f"Short names: {int(latest['short_count'])}  |  "
+        f"SMT GBp: {f'{smt_price:,.2f}' if pd.notna(smt_price) else 'n/a'} "
+        f"({smt_source if pd.notna(smt_source) else 'n/a'})  |  "
+        f"SMT USD/share: ${smt_usd:,.4f}" if pd.notna(smt_usd) else "SMT USD/share: n/a"
     )
 
     if len(df_view) > 1:
@@ -288,18 +336,21 @@ def _render_long_short_pair_section():
             x=df_view["report_date"], y=df_view["short_pnl"],
             name="Short Basket PnL", marker_color="#dc2626",
         ))
-        smt_pnl_series = df_view["smt_pnl"].fillna(0)
         fig.add_trace(go.Bar(
-            x=df_view["report_date"], y=smt_pnl_series,
-            name="SMT LN PnL", marker_color="#0f4c81",
+            x=df_view["report_date"], y=df_view["smt_otc_pnl"].fillna(0),
+            name="SMT OTC TRS PnL", marker_color="#0f4c81",
+        ))
+        fig.add_trace(go.Bar(
+            x=df_view["report_date"], y=df_view["smt_swap_long_pnl"].fillna(0),
+            name="SMT Swap-report Long PnL", marker_color="#7c3aed",
         ))
         fig.add_trace(go.Scatter(
             x=df_view["report_date"], y=df_view["pair_pnl"],
-            name="Pair PnL", mode="lines+markers",
+            name="Pair PnL (total)", mode="lines+markers",
             line=dict(color="#16a34a", width=3),
         ))
         fig.update_layout(
-            title="Daily Pair PnL Breakdown",
+            title="Daily Pair PnL Breakdown — Short Basket + SMT (OTC TRS + Swap Report Long)",
             xaxis_title="Report Date",
             yaxis_title="PnL (USD)",
             yaxis_tickformat="$,.0f",
@@ -310,16 +361,21 @@ def _render_long_short_pair_section():
 
     st.markdown("### Daily PnL Table")
     table = df_view[[
-        "report_date", "short_count", "short_market_value", "short_cost_market_value",
-        "short_pnl", "smt_current_price", "smt_pnl", "pair_pnl", "daily_pair_pnl_change",
+        "report_date", "short_count", "short_pnl",
+        "smt_current_price", "smt_otc_current_fx", "smt_otc_current_usd_price",
+        "smt_otc_pnl", "smt_swap_long_quantity", "smt_swap_long_pnl",
+        "smt_pnl", "pair_pnl", "daily_pair_pnl_change",
     ]].copy()
     table["report_date"] = table["report_date"].dt.strftime("%Y-%m-%d")
     st.dataframe(
         table.sort_values("report_date", ascending=False).style.format({
-            "short_market_value": "${:,.0f}",
-            "short_cost_market_value": "${:,.0f}",
             "short_pnl": "${:,.0f}",
-            "smt_current_price": "{:,.4f}",
+            "smt_current_price": "{:,.2f}p",
+            "smt_otc_current_fx": "{:,.4f}",
+            "smt_otc_current_usd_price": "${:,.4f}",
+            "smt_otc_pnl": "${:,.0f}",
+            "smt_swap_long_quantity": "{:,.0f}",
+            "smt_swap_long_pnl": "${:,.0f}",
             "smt_pnl": "${:,.0f}",
             "pair_pnl": "${:,.0f}",
             "daily_pair_pnl_change": "${:,.0f}",
@@ -328,25 +384,42 @@ def _render_long_short_pair_section():
         hide_index=True,
     )
 
-    st.markdown("### Latest Short Basket Detail")
     latest_result = next((r for r in results if r.report_date == latest["report_date"].date()), None)
-    if latest_result and latest_result.short_basket_detail:
-        detail_df = pd.DataFrame(latest_result.short_basket_detail)
-        detail_df = detail_df.sort_values("pnl_usd")
-        st.dataframe(
-            detail_df.style.format({
-                "quantity": "{:,.0f}",
-                "trade_price": "{:,.4f}",
-                "current_price": "{:,.4f}",
-                "market_value_usd": "${:,.2f}",
-                "cost_market_value_usd": "${:,.2f}",
-                "pnl_usd": "${:,.2f}",
-            }, na_rep="n/a"),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No short basket detail available for the latest report.")
+    detail_cols = st.columns(2)
+    with detail_cols[0]:
+        st.markdown("### Latest Short Basket Detail")
+        if latest_result and latest_result.short_basket_detail:
+            detail_df = pd.DataFrame(latest_result.short_basket_detail).sort_values("pnl_usd")
+            st.dataframe(
+                detail_df.style.format({
+                    "quantity": "{:,.0f}",
+                    "trade_price": "{:,.4f}",
+                    "current_price": "{:,.4f}",
+                    "market_value_usd": "${:,.2f}",
+                    "cost_market_value_usd": "${:,.2f}",
+                    "pnl_usd": "${:,.2f}",
+                }, na_rep="n/a"),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("No short basket detail available for the latest report.")
+    with detail_cols[1]:
+        st.markdown("### Latest SMT Swap-report Long Detail")
+        if latest_result and latest_result.smt_swap_long_detail:
+            sl_df = pd.DataFrame(latest_result.smt_swap_long_detail)
+            st.dataframe(
+                sl_df.style.format({
+                    "quantity": "{:,.0f}",
+                    "trade_price_gbp": "{:,.4f}",
+                    "current_price_gbp": "{:,.4f}",
+                    "market_value_usd": "${:,.2f}",
+                    "cost_market_value_usd": "${:,.2f}",
+                    "pnl_usd": "${:,.2f}",
+                }, na_rep="n/a"),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("No SMT LN long position in this report's Component Underlyings.")
 
     st.markdown("---")
     _render_nav_and_spacex_section(df_view, results, pp, config)
@@ -355,9 +428,20 @@ def _render_long_short_pair_section():
 def _build_nav_view(
     df_view: pd.DataFrame, nav_df: pd.DataFrame, pair_cfg: dict, nav_field: str
 ) -> pd.DataFrame:
-    smt_shares = float(pair_cfg["smt_shares"])
-    smt_initial = float(pair_cfg["smt_initial_price"])
-    smt_scale = float(pair_cfg.get("smt_price_scale", 100.0))
+    """Build NAV-based PnL view for the FX-linked OTC TRS leg.
+
+    NAV-basis PnL for OTC TRS = (NAV_today_pence/100 × current_FX
+                                  - NAV_at_trade_date_pence/100 × initial_FX) × shares.
+    The swap-report SMT long leg is already mark-to-market in the report — its PnL
+    is carried through unchanged, and only the OTC leg is re-priced on NAV.
+    """
+    otc_cfg = pair_cfg.get("smt_otc_trs", {}) or {}
+    otc_shares = float(otc_cfg.get("shares", pair_cfg.get("smt_shares", 0)))
+    initial_fx = float(otc_cfg.get("initial_fx_gbpusd", 0.0)) or None
+    trade_date_raw = otc_cfg.get("trade_date")
+    trade_date = (
+        pd.Timestamp(trade_date_raw) if isinstance(trade_date_raw, str) and trade_date_raw else None
+    )
 
     merged = df_view.merge(
         nav_df[["valuation_date", nav_field]].rename(columns={
@@ -366,9 +450,32 @@ def _build_nav_view(
         on="report_date",
         how="left",
     )
-    merged["smt_nav_pnl"] = (merged["smt_nav_pence"] - smt_initial) * smt_shares / smt_scale
+
+    # Anchor NAV: NAV as of the trade date (closest <= trade_date if exact not in cache).
+    initial_nav_pence = None
+    if trade_date is not None and not nav_df.empty:
+        eligible = nav_df[nav_df["valuation_date"] <= trade_date]
+        if not eligible.empty:
+            initial_nav_pence = float(eligible.iloc[-1][nav_field])
+
+    if initial_nav_pence and initial_fx:
+        nav_initial_usd = (initial_nav_pence / 100.0) * initial_fx
+        merged["smt_nav_usd_per_share"] = (
+            merged["smt_nav_pence"] / 100.0 * merged["smt_otc_current_fx"]
+        )
+        merged["smt_otc_nav_pnl"] = (merged["smt_nav_usd_per_share"] - nav_initial_usd) * otc_shares
+    else:
+        merged["smt_nav_usd_per_share"] = pd.NA
+        merged["smt_otc_nav_pnl"] = pd.NA
+
+    # Combined NAV-basis SMT PnL = OTC NAV PnL + swap-report SMT long PnL (mark-to-market).
+    merged["smt_nav_pnl"] = merged["smt_otc_nav_pnl"].astype(float) + merged["smt_swap_long_pnl"].fillna(0.0)
     merged["nav_minus_price_pnl"] = merged["smt_nav_pnl"] - merged["smt_pnl"]
     merged["pair_pnl_nav_basis"] = merged["short_pnl"] + merged["smt_nav_pnl"]
+    merged.attrs["initial_nav_pence"] = initial_nav_pence
+    merged.attrs["nav_initial_usd"] = (
+        (initial_nav_pence / 100.0) * initial_fx if (initial_nav_pence and initial_fx) else None
+    )
     return merged
 
 
@@ -418,24 +525,41 @@ def _render_nav_and_spacex_section(df_view, results, pp, config):
     ])
 
     with nav_tab:
+        initial_nav_pence = nav_view.attrs.get("initial_nav_pence")
+        nav_initial_usd = nav_view.attrs.get("nav_initial_usd")
+        otc_cfg_local = config.get("pair", {}).get("smt_otc_trs", {})
         st.markdown(
-            "**SMT LN PnL decomposed.**  Price-basis uses the share/transaction price "
-            "from the swap report (or FMP/Yahoo close). NAV-basis uses the official "
-            f"RNS NAV (`{nav_field}`). The gap = discount/premium drift.  \n"
-            "*Baseline assumption: `smt_initial_price` is used as both the price-entry "
-            "and NAV-entry reference; adjust in `config.json` if you have a separate entry NAV.*"
+            "**SMT LN PnL decomposed (OTC TRS leg).**  Price-basis values the OTC TRS "
+            f"position at `current_GBP × current_FX − $19.3925` (term-sheet net cost). "
+            f"NAV-basis values it at `NAV_GBp/100 × current_FX − NAV_at_trade_date/100 × {otc_cfg_local.get('initial_fx_gbpusd', 0):.4f}`. "
+            "The gap = discount/premium drift relative to the trade entry.  \n"
+            f"Anchor NAV (`{nav_field}` on/before "
+            f"{otc_cfg_local.get('trade_date', 'trade date')}): "
+            f"{initial_nav_pence:.2f}p" if initial_nav_pence else
+            "Anchor NAV: not yet resolved (need NAV history covering the trade date)."
         )
-        nav_available = nav_view.dropna(subset=["smt_nav_pence"])
+        st.caption(
+            f"Anchor NAV USD/share = {nav_initial_usd:.4f}  |  "
+            f"Combined NAV PnL = OTC NAV PnL + swap-report SMT long PnL (mark-to-market)."
+            if nav_initial_usd else
+            ""
+        )
+
+        nav_available = nav_view.dropna(subset=["smt_nav_pence", "smt_otc_nav_pnl"])
         if nav_available.empty:
             st.info("No swap-report dates overlap the NAV cache yet.")
         else:
             latest = nav_available.iloc[-1]
-            tag = f" (NAV as of {latest['report_date'].strftime('%Y-%m-%d')})"
+            tag = f" (as of {latest['report_date'].strftime('%Y-%m-%d')})"
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("SMT Price PnL" + tag, _money(latest["smt_pnl"]))
-            c2.metric("SMT NAV PnL" + tag, _money(latest["smt_nav_pnl"]))
+            c1.metric("SMT Price PnL (combined)" + tag, _money(latest["smt_pnl"]))
+            c2.metric("SMT NAV PnL (combined)" + tag, _money(latest["smt_nav_pnl"]))
             c3.metric("Discount Drift PnL", _money(latest["nav_minus_price_pnl"]))
             c4.metric("Pair PnL (NAV basis)", _money(latest["pair_pnl_nav_basis"]))
+            d1, d2, d3 = st.columns(3)
+            d1.metric("→ OTC TRS NAV PnL", _money(latest["smt_otc_nav_pnl"]))
+            d2.metric("→ Swap-report SMT long PnL", _money(latest["smt_swap_long_pnl"]))
+            d3.metric("NAV USD/share", f"${latest['smt_nav_usd_per_share']:.4f}" if pd.notna(latest["smt_nav_usd_per_share"]) else "n/a")
             if len(nav_view) > len(nav_available):
                 missing = nav_view[nav_view["smt_nav_pence"].isna()]["report_date"].dt.strftime("%Y-%m-%d").tolist()
                 st.caption(f"NAV not yet published for: {', '.join(missing)} (RNS releases T+1 ~11:30 BST).")
