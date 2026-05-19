@@ -11,6 +11,7 @@ google-auth
 google-auth-httplib2
 google-auth-oauthlib
 requests
+beautifulsoup4
 lxml
 flask
 gunicorn
