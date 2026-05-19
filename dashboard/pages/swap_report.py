@@ -262,8 +262,26 @@ def _render_long_short_pair_section():
     df_view = df_view.sort_values("report_date").drop_duplicates("report_date", keep="last").reset_index(drop=True)
     df_view["daily_pair_pnl_change"] = df_view["pair_pnl"].diff().fillna(df_view["pair_pnl"])
 
-    latest = df_view.iloc[-1]
+    # Daily exposure metrics.
     otc_cfg = config.get("pair", {}).get("smt_otc_trs", {})
+    otc_shares_cfg = float(otc_cfg.get("shares", 0))
+    df_view["smt_otc_market_value_usd"] = (
+        df_view["smt_otc_current_usd_price"].astype(float) * otc_shares_cfg
+    )
+    df_view["smt_long_mv_total"] = (
+        df_view["smt_otc_market_value_usd"].fillna(0.0)
+        + df_view["smt_swap_long_market_value_usd"].fillna(0.0)
+    )
+    df_view["short_mv_abs"] = df_view["short_market_value"].abs()
+    df_view["gross_exposure"] = df_view["smt_long_mv_total"] + df_view["short_mv_abs"]
+    df_view["net_exposure"] = df_view["smt_long_mv_total"] - df_view["short_mv_abs"]
+    df_view["hedge_ratio"] = df_view.apply(
+        lambda r: (r["short_mv_abs"] / r["smt_long_mv_total"])
+        if r["smt_long_mv_total"] and r["smt_long_mv_total"] > 0 else float("nan"),
+        axis=1,
+    )
+
+    latest = df_view.iloc[-1]
     with st.expander("SMT OTC TRS — term sheet"):
         cols = st.columns(3)
         cols[0].markdown(
@@ -320,6 +338,47 @@ def _render_long_short_pair_section():
         ),
     )
 
+    st.markdown("#### Daily Exposure")
+    e1, e2, e3, e4, e5 = st.columns(5)
+    e1.metric(
+        "SMT Long MV (combined)",
+        f"${latest['smt_long_mv_total']:,.0f}",
+        help="OTC TRS current notional + SMT positions inside the swap report (USD).",
+    )
+    e2.metric(
+        "Short Basket MV",
+        f"${latest['short_mv_abs']:,.0f}",
+        help="Absolute notional of the US negative-quantity rows in the swap report.",
+    )
+    e3.metric(
+        "Gross Exposure",
+        f"${latest['gross_exposure']:,.0f}",
+        help="|Long MV| + |Short MV| — total capital at risk.",
+    )
+    net_delta_sign = "Net long" if latest["net_exposure"] > 0 else ("Net short" if latest["net_exposure"] < 0 else "Flat")
+    e4.metric(
+        "Net Exposure",
+        f"${latest['net_exposure']:,.0f}",
+        delta=net_delta_sign,
+        help="Long MV − |Short MV|. Positive = net long the pair.",
+    )
+    hr = latest["hedge_ratio"]
+    hr_delta = None
+    if pd.notna(hr):
+        if hr < 0.95:
+            hr_delta = f"Under-hedged ({(1-hr)*100:.0f}% net long)"
+        elif hr > 1.05:
+            hr_delta = f"Over-hedged ({(hr-1)*100:.0f}% net short)"
+        else:
+            hr_delta = "Near balanced"
+    e5.metric(
+        "Hedge Ratio",
+        f"{hr:.1%}" if pd.notna(hr) else "n/a",
+        delta=hr_delta,
+        delta_color="off",
+        help="|Short MV| / Long MV. 100% = fully delta-matched.",
+    )
+
     smt_price = latest.get("smt_current_price")
     smt_source = latest.get("smt_price_source")
     smt_usd = latest.get("smt_otc_current_usd_price")
@@ -359,12 +418,44 @@ def _render_long_short_pair_section():
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### Daily PnL Table")
+    if len(df_view) > 1:
+        exp_chart = go.Figure()
+        exp_chart.add_trace(go.Bar(
+            x=df_view["report_date"], y=df_view["smt_long_mv_total"],
+            name="SMT Long MV", marker_color="#0f4c81",
+        ))
+        exp_chart.add_trace(go.Bar(
+            x=df_view["report_date"], y=-df_view["short_mv_abs"],
+            name="Short Basket MV (shown negative)", marker_color="#dc2626",
+        ))
+        exp_chart.add_trace(go.Scatter(
+            x=df_view["report_date"], y=df_view["net_exposure"],
+            name="Net Exposure", mode="lines+markers",
+            line=dict(color="#16a34a", width=2),
+        ))
+        exp_chart.add_trace(go.Scatter(
+            x=df_view["report_date"], y=df_view["hedge_ratio"],
+            name="Hedge Ratio (right axis)", mode="lines+markers",
+            line=dict(color="#7c3aed", width=2, dash="dot"),
+            yaxis="y2",
+        ))
+        exp_chart.update_layout(
+            title="Daily Exposure: Long MV vs Short MV with Net Exposure & Hedge Ratio",
+            barmode="relative",
+            yaxis=dict(title="USD", tickformat="$,.0f"),
+            yaxis2=dict(title="Hedge Ratio", overlaying="y", side="right", tickformat=".0%"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(exp_chart, use_container_width=True)
+
+    st.markdown("### Daily PnL & Exposure Table")
     table = df_view[[
         "report_date", "short_count", "short_pnl",
         "smt_current_price", "smt_otc_current_fx", "smt_otc_current_usd_price",
         "smt_otc_pnl", "smt_swap_long_quantity", "smt_swap_long_pnl",
         "smt_pnl", "pair_pnl", "daily_pair_pnl_change",
+        "smt_long_mv_total", "short_mv_abs",
+        "gross_exposure", "net_exposure", "hedge_ratio",
     ]].copy()
     table["report_date"] = table["report_date"].dt.strftime("%Y-%m-%d")
     st.dataframe(
@@ -379,6 +470,11 @@ def _render_long_short_pair_section():
             "smt_pnl": "${:,.0f}",
             "pair_pnl": "${:,.0f}",
             "daily_pair_pnl_change": "${:,.0f}",
+            "smt_long_mv_total": "${:,.0f}",
+            "short_mv_abs": "${:,.0f}",
+            "gross_exposure": "${:,.0f}",
+            "net_exposure": "${:,.0f}",
+            "hedge_ratio": "{:.1%}",
         }, na_rep="n/a"),
         use_container_width=True,
         hide_index=True,
