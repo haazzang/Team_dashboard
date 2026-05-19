@@ -195,9 +195,40 @@ def _render_long_short_pair_section():
                 "Short basket PnL still computed; total pair PnL will exclude SMT leg."
             )
 
-    if not PAIR_PNL_REPORTS_DIR.exists():
-        st.warning(f"Reports directory not found: {PAIR_PNL_REPORTS_DIR}")
-        return
+    PAIR_PNL_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    user_env = config.get("email", {}).get("imap_user_env", "GMAIL_USER")
+    pwd_env = config.get("email", {}).get("imap_password_env", "GMAIL_APP_PASSWORD")
+    gmail_present = bool(_get_secret(user_env) and _get_secret(pwd_env))
+
+    with st.expander("Setup status", expanded=not gmail_present):
+        s1, s2, s3 = st.columns(3)
+        s1.markdown(f"**Gmail IMAP**  \n{'OK' if gmail_present else 'NOT SET'}")
+        s2.markdown(f"**FMP API key**  \n{'OK' if fmp_key_present else 'NOT SET (Yahoo fallback active)'}")
+        s3.markdown(f"**Reports dir**  \n`{PAIR_PNL_REPORTS_DIR}`")
+        if not gmail_present:
+            st.markdown(
+                "Set `GMAIL_USER` and `GMAIL_APP_PASSWORD` in **Streamlit Cloud → Manage app → "
+                "Settings → Secrets** to enable auto-fetch. Until then, upload JMLNKWGE `.xlsx` "
+                "files directly below."
+            )
+
+    uploads = st.file_uploader(
+        "Upload JMLNKWGE swap report(s) (.xlsx)",
+        type=["xlsx", "xlsm"],
+        accept_multiple_files=True,
+        key="pair_pnl_uploader",
+        help="Upload one or more daily JMLNKWGE EOD reports. They are saved to the reports folder for this session.",
+    )
+    if uploads:
+        saved_names = []
+        for uf in uploads:
+            dest = PAIR_PNL_REPORTS_DIR / uf.name
+            dest.write_bytes(uf.getvalue())
+            saved_names.append(uf.name)
+        st.success(f"Saved {len(saved_names)} file(s): {', '.join(saved_names)}")
+        st.cache_data.clear()
+        st.rerun()
 
     report_files = sorted(
         p for p in PAIR_PNL_REPORTS_DIR.iterdir()
@@ -205,12 +236,13 @@ def _render_long_short_pair_section():
     )
     if not report_files:
         st.info(
-            f"No reports found in {PAIR_PNL_REPORTS_DIR}. "
-            "Use the 'Fetch latest from Gmail' button above, or drop a JMLNKWGE .xlsx into the folder."
+            "No swap reports on disk yet. Use the uploader above, the **Fetch latest from Gmail** "
+            "button (requires Gmail secrets), or drop `.xlsx` files into "
+            f"`{PAIR_PNL_REPORTS_DIR}` if running locally."
         )
         return
 
-    st.caption(f"{len(report_files)} report file(s) in `{PAIR_PNL_REPORTS_DIR}`")
+    st.caption(f"{len(report_files)} report file(s) loaded.")
 
     results, skipped = _compute_pair_pnl_results(
         tuple(str(p) for p in report_files),
