@@ -103,6 +103,18 @@ class ReportPnL:
     smt_pnl: float | None
     pair_pnl: float
     short_basket_detail: list[dict[str, Any]] | None = None
+    # SMT OTC TRS leg (from term sheet)
+    smt_otc_pnl: float | None = None
+    smt_otc_current_usd_price: float | None = None
+    smt_otc_current_fx: float | None = None
+    smt_otc_fx_source: str | None = None
+    # SMT positions held inside the swap report (positive qty in Component Underlyings)
+    smt_swap_long_count: int = 0
+    smt_swap_long_quantity: float = 0.0
+    smt_swap_long_market_value_usd: float = 0.0
+    smt_swap_long_cost_usd: float = 0.0
+    smt_swap_long_pnl: float = 0.0
+    smt_swap_long_detail: list[dict[str, Any]] | None = None
 
 
 class MarketDataUnavailable(Exception):
@@ -653,6 +665,71 @@ def normalize_smt_current_price(price: float | None, pair_cfg: dict[str, Any]) -
     return price
 
 
+def fetch_yahoo_fx(symbol: str, report_date: dt.date) -> float:
+    """Fetch EOD GBPUSD (or similar FX pair) close from Yahoo Finance."""
+    start = report_date - dt.timedelta(days=5)
+    end = report_date + dt.timedelta(days=2)
+    period1 = int(dt.datetime.combine(start, dt.time(), dt.timezone.utc).timestamp())
+    period2 = int(dt.datetime.combine(end, dt.time(), dt.timezone.utc).timestamp())
+    url = (
+        "https://query2.finance.yahoo.com/v8/finance/chart/"
+        + urllib.parse.quote(symbol)
+        + "?"
+        + urllib.parse.urlencode({
+            "period1": period1, "period2": period2,
+            "interval": "1d", "events": "history",
+        })
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise MarketDataUnavailable(f"Yahoo FX unavailable for {symbol}: HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise MarketDataUnavailable(f"Yahoo FX unavailable for {symbol}: {exc}") from exc
+
+    result = ((data.get("chart") or {}).get("result") or [None])[0]
+    if not isinstance(result, dict):
+        raise MarketDataUnavailable(f"Yahoo FX empty chart for {symbol}")
+    timestamps = result.get("timestamp") or []
+    quote = (((result.get("indicators") or {}).get("quote") or [{}])[0])
+    closes = quote.get("close") or []
+    rows = [
+        (dt.datetime.fromtimestamp(ts, dt.timezone.utc).date(), parse_number(c))
+        for ts, c in zip(timestamps, closes) if c is not None
+    ]
+    rows = [(d, p) for d, p in rows if p is not None]
+    if not rows:
+        raise MarketDataUnavailable(f"Yahoo FX no closes for {symbol}")
+    # exact match
+    for d, p in rows:
+        if d == report_date:
+            return p
+    # else latest <= report_date
+    on_or_before = [(d, p) for d, p in rows if d <= report_date]
+    if on_or_before:
+        return on_or_before[-1][1]
+    raise MarketDataUnavailable(f"Yahoo FX no row on/before {report_date}")
+
+
+def fetch_gbpusd_fx(config: dict[str, Any], report_date: dt.date) -> tuple[float | None, str | None]:
+    symbol = config.get("market_data", {}).get("gbpusd_symbol", "GBPUSD=X")
+    try:
+        return fetch_yahoo_fx(symbol, report_date), f"Yahoo {symbol} close"
+    except MarketDataUnavailable:
+        return None, None
+
+
+def is_smt_long_row(
+    row: pd.Series, ticker_col: str, qty_col: str, smt_ticker: str
+) -> bool:
+    qty = parse_number(row[qty_col])
+    if qty is None or qty <= 0:
+        return False
+    return same_ticker(row[ticker_col], smt_ticker)
+
+
 def calculate_report(path: Path, config: dict[str, Any]) -> ReportPnL:
     pair_cfg = config["pair"]
     sheets = workbook_sheets(path)
@@ -720,18 +797,86 @@ def calculate_report(path: Path, config: dict[str, Any]) -> ReportPnL:
 
     short_pnl = short_mv - short_cost
 
+    # --- SMT current price (in GBp pence) ---
     smt_current_price, smt_price_source = fetch_market_price(config, report_date)
     if smt_current_price is None:
-        smt_current_price = normalize_smt_current_price(find_smt_current_price(component, pair_cfg), pair_cfg)
-        smt_price_source = "swap report" if smt_current_price is not None else None
-    smt_pnl = None
-    if smt_current_price is not None:
-        smt_pnl = (
-            (smt_current_price - float(pair_cfg["smt_initial_price"]))
-            * float(pair_cfg["smt_shares"])
-            / float(pair_cfg.get("smt_price_scale", 100.0))
+        smt_current_price = normalize_smt_current_price(
+            find_smt_current_price(component, pair_cfg), pair_cfg
         )
-    pair_pnl = short_pnl + (smt_pnl or 0.0)
+        smt_price_source = "swap report" if smt_current_price is not None else None
+
+    # --- SMT OTC TRS leg (term-sheet driven, FX-linked) ---
+    otc_cfg = pair_cfg.get("smt_otc_trs") or {}
+    otc_shares = float(otc_cfg.get("shares", pair_cfg.get("smt_shares", 0)))
+    otc_initial_net_usd = float(otc_cfg.get("initial_net_price_usd", 0.0))
+    otc_trade_date_raw = otc_cfg.get("trade_date")
+    otc_trade_date = (
+        dt.date.fromisoformat(otc_trade_date_raw)
+        if isinstance(otc_trade_date_raw, str) and otc_trade_date_raw
+        else None
+    )
+    otc_pnl = None
+    otc_current_usd_price = None
+    otc_current_fx = None
+    otc_fx_source = None
+    if otc_shares and otc_initial_net_usd and smt_current_price is not None:
+        trade_started = otc_trade_date is None or report_date >= otc_trade_date
+        if trade_started:
+            otc_current_fx, otc_fx_source = fetch_gbpusd_fx(config, report_date)
+            if otc_current_fx is not None:
+                # smt_current_price is in GBp; convert to GBP then to USD via FX.
+                otc_current_usd_price = (smt_current_price / 100.0) * otc_current_fx
+                otc_pnl = (otc_current_usd_price - otc_initial_net_usd) * otc_shares
+        else:
+            otc_pnl = 0.0  # before trade date
+
+    # --- SMT positions inside the swap report (positive qty, settles in GBP) ---
+    smt_ticker = pair_cfg.get("smt_ticker", "SMT LN")
+    swap_long_count = 0
+    swap_long_qty = 0.0
+    swap_long_mv = 0.0
+    swap_long_cost = 0.0
+    swap_long_detail: list[dict[str, Any]] = []
+    if pair_cfg.get("include_swap_report_smt_long", True):
+        for _, row in component.iterrows():
+            if not is_smt_long_row(row, ticker_col, qty_col, smt_ticker):
+                continue
+            qty = parse_number(row[qty_col])
+            mv = parse_number(row[mv_col])
+            if qty is None or mv is None or qty <= 0:
+                continue
+            trade_price = lookup_trade_price(trade_prices, row_ticker(row[ticker_col]))
+            if trade_price is None and comp_trade_col:
+                trade_price = parse_number(row[comp_trade_col])
+            if trade_price is None:
+                continue
+            signed_mv = signed_market_value(mv, qty)
+            # cost in USD: qty * trade_price_GBP * current_FX (approximation; trade FX usually
+            # close to current FX for short-dated positions). Authoritative current MV is `mv`.
+            fx_for_cost = otc_current_fx
+            if fx_for_cost is None:
+                fx_for_cost, _ = fetch_gbpusd_fx(config, report_date)
+            cost_usd = qty * trade_price * (fx_for_cost or 0.0)
+            pnl_usd = signed_mv - cost_usd if fx_for_cost else 0.0
+            swap_long_count += 1
+            swap_long_qty += qty
+            swap_long_mv += signed_mv
+            swap_long_cost += cost_usd
+            swap_long_detail.append({
+                "ticker": row_ticker(row[ticker_col]),
+                "name": str(row[name_col]) if name_col and pd.notna(row[name_col]) else "",
+                "quantity": qty,
+                "trade_price_gbp": trade_price,
+                "current_price_gbp": parse_number(row[current_price_col]) if current_price_col else None,
+                "market_value_usd": signed_mv,
+                "cost_market_value_usd": cost_usd,
+                "pnl_usd": pnl_usd,
+            })
+    swap_long_pnl = swap_long_mv - swap_long_cost
+
+    # --- Combined SMT PnL (OTC TRS + swap-report long) ---
+    smt_pnl = (otc_pnl or 0.0) + swap_long_pnl
+    pair_pnl = short_pnl + smt_pnl
     return ReportPnL(
         report_date=report_date,
         report_file=str(path),
@@ -744,6 +889,16 @@ def calculate_report(path: Path, config: dict[str, Any]) -> ReportPnL:
         smt_pnl=smt_pnl,
         pair_pnl=pair_pnl,
         short_basket_detail=short_detail,
+        smt_otc_pnl=otc_pnl,
+        smt_otc_current_usd_price=otc_current_usd_price,
+        smt_otc_current_fx=otc_current_fx,
+        smt_otc_fx_source=otc_fx_source,
+        smt_swap_long_count=swap_long_count,
+        smt_swap_long_quantity=swap_long_qty,
+        smt_swap_long_market_value_usd=swap_long_mv,
+        smt_swap_long_cost_usd=swap_long_cost,
+        smt_swap_long_pnl=swap_long_pnl,
+        smt_swap_long_detail=swap_long_detail,
     )
 
 
@@ -775,6 +930,15 @@ def results_to_frame(results: list[ReportPnL]) -> pd.DataFrame:
             "smt_price_source": r.smt_price_source,
             "smt_pnl": r.smt_pnl,
             "pair_pnl": r.pair_pnl,
+            "smt_otc_pnl": r.smt_otc_pnl,
+            "smt_otc_current_usd_price": r.smt_otc_current_usd_price,
+            "smt_otc_current_fx": r.smt_otc_current_fx,
+            "smt_otc_fx_source": r.smt_otc_fx_source,
+            "smt_swap_long_count": r.smt_swap_long_count,
+            "smt_swap_long_quantity": r.smt_swap_long_quantity,
+            "smt_swap_long_market_value_usd": r.smt_swap_long_market_value_usd,
+            "smt_swap_long_cost_usd": r.smt_swap_long_cost_usd,
+            "smt_swap_long_pnl": r.smt_swap_long_pnl,
         }
         for r in results
     ]
