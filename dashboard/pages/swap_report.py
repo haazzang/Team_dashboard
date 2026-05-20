@@ -306,7 +306,21 @@ def _render_long_short_pair_section():
             f"{otc_cfg.get('commission_in_bps', 0)}bps / {otc_cfg.get('commission_out_bps', 0)}bps  \n"
         )
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    hr_latest = latest["hedge_ratio"]
+    hr_delta_text = None
+    hr_delta_color = "off"
+    if pd.notna(hr_latest):
+        if hr_latest < 0.95:
+            hr_delta_text = f"Under-hedged ({(1 - hr_latest) * 100:.0f}% net long)"
+            hr_delta_color = "inverse"
+        elif hr_latest > 1.05:
+            hr_delta_text = f"Over-hedged ({(hr_latest - 1) * 100:.0f}% net short)"
+            hr_delta_color = "inverse"
+        else:
+            hr_delta_text = "Near balanced"
+            hr_delta_color = "normal"
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Report Date", latest["report_date"].strftime("%Y-%m-%d"))
     m2.metric("Short Basket PnL", f"${latest['short_pnl']:,.0f}")
     smt_pnl_value = latest["smt_pnl"]
@@ -316,6 +330,13 @@ def _render_long_short_pair_section():
     )
     m4.metric("Pair PnL", f"${latest['pair_pnl']:,.0f}")
     m5.metric("Daily Change", f"${latest['daily_pair_pnl_change']:,.0f}")
+    m6.metric(
+        "Hedge Ratio",
+        f"{hr_latest:.1%}" if pd.notna(hr_latest) else "n/a",
+        delta=hr_delta_text,
+        delta_color=hr_delta_color,
+        help="|Short MV| / Long MV. 100% = fully delta-matched. <95% = net long, >105% = net short.",
+    )
 
     s1, s2, s3 = st.columns(3)
     s1.metric(
@@ -447,6 +468,45 @@ def _render_long_short_pair_section():
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(exp_chart, use_container_width=True)
+
+        st.markdown("#### Hedge Ratio Trend")
+        hr_chart = go.Figure()
+        hr_series = df_view["hedge_ratio"]
+        x_dates = df_view["report_date"]
+        # Reference bands
+        hr_chart.add_hrect(
+            y0=0.95, y1=1.05, fillcolor="#16a34a", opacity=0.12, line_width=0,
+            annotation_text="Balanced zone (95–105%)", annotation_position="top right",
+            annotation=dict(font=dict(color="#15803d", size=11)),
+        )
+        hr_chart.add_hline(y=1.0, line=dict(color="#374151", width=1, dash="dash"))
+        # Color points by zone
+        marker_colors = [
+            "#16a34a" if pd.notna(v) and 0.95 <= v <= 1.05
+            else ("#dc2626" if pd.notna(v) and v < 0.95 else ("#f97316" if pd.notna(v) and v > 1.05 else "#9ca3af"))
+            for v in hr_series
+        ]
+        hr_chart.add_trace(go.Scatter(
+            x=x_dates, y=hr_series,
+            mode="lines+markers",
+            line=dict(color="#7c3aed", width=2.5),
+            marker=dict(size=10, color=marker_colors, line=dict(width=1.5, color="#ffffff")),
+            name="Hedge Ratio",
+            hovertemplate="%{x|%Y-%m-%d}<br>Hedge Ratio: %{y:.1%}<extra></extra>",
+        ))
+        hr_chart.update_layout(
+            title=None,
+            yaxis=dict(title="|Short MV| / Long MV", tickformat=".0%"),
+            xaxis_title="Report Date",
+            height=300,
+            margin=dict(t=10, b=40),
+            showlegend=False,
+        )
+        st.plotly_chart(hr_chart, use_container_width=True)
+        st.caption(
+            "Green band = 95–105% (delta-matched); red dot = under-hedged (net long); "
+            "orange dot = over-hedged (net short)."
+        )
 
     st.markdown("### Daily PnL & Exposure Table")
     table = df_view[[
