@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -24,6 +25,24 @@ PAIR_PNL_ROOT = _resolve_pair_pnl_root()
 PAIR_PNL_REPORTS_DIR = PAIR_PNL_ROOT / "reports"
 SMT_NAV_CACHE = PAIR_PNL_ROOT / "data" / "smt_nav_history.json"
 
+
+def _resolve_swap_db_file() -> Path | None:
+    candidates = []
+    if os.environ.get("SWAP_REPORT_DB"):
+        candidates.append(Path(os.environ["SWAP_REPORT_DB"]).expanduser())
+    candidates.extend([
+        ROOT_DIR / "swap_reports.db",
+        Path.cwd() / "swap_reports.db",
+        Path("/Users/hyejinha/Desktop/Workspace/Team/swap_reports.db"),
+    ])
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
+SWAP_DB_FILE = _resolve_swap_db_file()
+
 # Default SpaceX weight in SMT NAV (as at 30-Apr-2026 filings ≈ 18-20%).
 DEFAULT_SPACEX_WEIGHT = 0.18
 
@@ -45,6 +64,191 @@ def _load_pair_pnl_module():
     import importlib
     import pair_pnl as _pp
     return importlib.reload(_pp)
+
+
+def _db_report_count() -> int:
+    if SWAP_DB_FILE is None or not SWAP_DB_FILE.exists():
+        return 0
+    try:
+        with sqlite3.connect(SWAP_DB_FILE) as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0])
+    except Exception:
+        return 0
+
+
+@st.cache_data(show_spinner=False)
+def _load_swap_underlying_from_db(db_path: str) -> pd.DataFrame:
+    with sqlite3.connect(db_path) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT
+                r.report_date,
+                r.filename,
+                u.ticker,
+                u.name,
+                u.quantity,
+                u.price,
+                u.market_value_usd,
+                u.pnl_usd,
+                u.country,
+                u.currency
+            FROM underlying u
+            JOIN reports r ON u.report_id = r.id
+            ORDER BY r.report_date ASC, u.market_value_usd ASC
+            """,
+            conn,
+        )
+
+
+def _is_smt_db_row(row: pd.Series) -> bool:
+    ticker = str(row.get("ticker", "")).strip().upper()
+    name = str(row.get("name", "")).strip().upper()
+    return ticker in {"SMT", "SMT.L", "SMTL"} or "SCOTTISH MORTGAGE" in name
+
+
+def _compute_pair_pnl_results_from_db() -> tuple[list, list[tuple[str, str]]]:
+    if SWAP_DB_FILE is None or not SWAP_DB_FILE.exists():
+        return [], []
+
+    pp = _load_pair_pnl_module()
+    config = pp.load_config(PAIR_PNL_ROOT / "config.json")
+    pair_cfg = config.get("pair", {})
+    otc_cfg = pair_cfg.get("smt_otc_trs") or {}
+
+    try:
+        df = _load_swap_underlying_from_db(str(SWAP_DB_FILE))
+    except Exception as exc:
+        return [], [(SWAP_DB_FILE.name, f"Could not read DB: {exc}")]
+    if df.empty:
+        return [], []
+
+    for col in ["quantity", "price", "market_value_usd", "pnl_usd"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["report_date"] = pd.to_datetime(df["report_date"], errors="coerce")
+    df = df.dropna(subset=["report_date"])
+    short_start = pd.to_datetime(pair_cfg.get("short_start_date", "2026-05-13")).date()
+    df = df[df["report_date"].dt.date >= short_start]
+
+    otc_shares = float(otc_cfg.get("shares", pair_cfg.get("smt_shares", 0)) or 0)
+    otc_initial_net_usd = float(otc_cfg.get("initial_net_price_usd", 0.0) or 0.0)
+    otc_trade_date = None
+    if otc_cfg.get("trade_date"):
+        otc_trade_date = pd.to_datetime(otc_cfg["trade_date"]).date()
+
+    results = []
+    skipped: list[tuple[str, str]] = []
+    for report_ts, group in df.groupby(df["report_date"].dt.date, sort=True):
+        filename = str(group["filename"].dropna().iloc[0]) if not group["filename"].dropna().empty else str(report_ts)
+        short_mask = (
+            (group["quantity"] < 0)
+            & (group["currency"].astype(str).str.upper() == "USD")
+        )
+        short_rows = group.loc[short_mask].copy()
+        if short_rows.empty:
+            skipped.append((filename, "No USD short rows found in swap_reports.db."))
+            continue
+
+        short_mv = float(short_rows["market_value_usd"].sum())
+        short_pnl = float(short_rows["pnl_usd"].sum())
+        short_cost = short_mv - short_pnl
+        short_detail = []
+        for _, row in short_rows.iterrows():
+            qty = float(row["quantity"])
+            mv = float(row["market_value_usd"])
+            pnl = float(row["pnl_usd"])
+            cost = mv - pnl
+            trade_price = cost / qty if qty else None
+            short_detail.append({
+                "ticker": str(row["ticker"]),
+                "name": str(row["name"]),
+                "quantity": qty,
+                "trade_price": trade_price,
+                "current_price": float(row["price"]) if pd.notna(row["price"]) else None,
+                "market_value_usd": mv,
+                "cost_market_value_usd": cost,
+                "pnl_usd": pnl,
+            })
+
+        smt_rows = group[(group["quantity"] > 0) & group.apply(_is_smt_db_row, axis=1)].copy()
+        smt_current_price = None
+        smt_price_source = None
+        otc_current_fx = None
+        otc_fx_source = None
+        smt_swap_long_qty = 0.0
+        smt_swap_long_mv = 0.0
+        smt_swap_long_pnl = 0.0
+        smt_swap_long_cost = 0.0
+        smt_swap_long_detail = []
+
+        if not smt_rows.empty:
+            smt_swap_long_qty = float(smt_rows["quantity"].sum())
+            smt_swap_long_mv = float(smt_rows["market_value_usd"].sum())
+            smt_swap_long_pnl = float(smt_rows["pnl_usd"].sum())
+            smt_swap_long_cost = smt_swap_long_mv - smt_swap_long_pnl
+
+            first_smt = smt_rows.iloc[0]
+            price_gbp = float(first_smt["price"]) if pd.notna(first_smt["price"]) else None
+            if price_gbp:
+                smt_current_price = price_gbp * 100.0
+                smt_price_source = "swap_reports.db SMT row"
+                fx_denominator = float(first_smt["quantity"]) * price_gbp
+                if fx_denominator:
+                    otc_current_fx = abs(float(first_smt["market_value_usd"]) / fx_denominator)
+                    otc_fx_source = "swap_reports.db implied GBPUSD"
+
+            for _, row in smt_rows.iterrows():
+                qty = float(row["quantity"])
+                mv = float(row["market_value_usd"])
+                pnl = float(row["pnl_usd"])
+                cost = mv - pnl
+                price = float(row["price"]) if pd.notna(row["price"]) else None
+                trade_price = cost / (qty * otc_current_fx) if qty and otc_current_fx else None
+                smt_swap_long_detail.append({
+                    "ticker": str(row["ticker"]),
+                    "name": str(row["name"]),
+                    "quantity": qty,
+                    "trade_price_gbp": trade_price,
+                    "current_price_gbp": price,
+                    "market_value_usd": mv,
+                    "cost_market_value_usd": cost,
+                    "pnl_usd": pnl,
+                })
+
+        otc_pnl = None
+        otc_current_usd_price = None
+        trade_started = otc_trade_date is None or report_ts >= otc_trade_date
+        if trade_started and otc_shares and otc_initial_net_usd and smt_current_price and otc_current_fx:
+            otc_current_usd_price = (smt_current_price / 100.0) * otc_current_fx
+            otc_pnl = (otc_current_usd_price - otc_initial_net_usd) * otc_shares
+        elif not trade_started:
+            otc_pnl = 0.0
+
+        smt_pnl = (otc_pnl or 0.0) + smt_swap_long_pnl
+        results.append(pp.ReportPnL(
+            report_date=report_ts,
+            report_file=f"{SWAP_DB_FILE.name}:{filename}",
+            short_count=int(len(short_rows)),
+            short_market_value=short_mv,
+            short_cost_market_value=short_cost,
+            short_pnl=short_pnl,
+            smt_current_price=smt_current_price,
+            smt_price_source=smt_price_source,
+            smt_pnl=smt_pnl,
+            pair_pnl=short_pnl + smt_pnl,
+            short_basket_detail=short_detail,
+            smt_otc_pnl=otc_pnl,
+            smt_otc_current_usd_price=otc_current_usd_price,
+            smt_otc_current_fx=otc_current_fx,
+            smt_otc_fx_source=otc_fx_source,
+            smt_swap_long_count=int(len(smt_rows)),
+            smt_swap_long_quantity=smt_swap_long_qty,
+            smt_swap_long_market_value_usd=smt_swap_long_mv,
+            smt_swap_long_cost_usd=smt_swap_long_cost,
+            smt_swap_long_pnl=smt_swap_long_pnl,
+            smt_swap_long_detail=smt_swap_long_detail,
+        ))
+
+    return results, skipped
 
 
 def _load_smt_nav_module():
@@ -151,39 +355,39 @@ def _render_long_short_pair_section():
         # Surface st.secrets value into env so pair_pnl module reads it
         os.environ[fmp_env] = _get_secret(fmp_env)
 
+    user_env = config.get("email", {}).get("imap_user_env", "GMAIL_USER")
+    pwd_env = config.get("email", {}).get("imap_password_env", "GMAIL_APP_PASSWORD")
+    gmail_present = bool(_get_secret(user_env) and _get_secret(pwd_env))
+    db_report_count = _db_report_count()
+
     _auto_fetch_if_stale(pp, config)
 
     c_fetch, c_recalc, c_status = st.columns([1.2, 1, 3])
     with c_fetch:
-        if st.button("Fetch latest from Gmail", key="pair_pnl_fetch_gmail"):
-            user_env = config.get("email", {}).get("imap_user_env", "GMAIL_USER")
-            pwd_env = config.get("email", {}).get("imap_password_env", "GMAIL_APP_PASSWORD")
+        if st.button("Fetch latest from Gmail", key="pair_pnl_fetch_gmail", disabled=not gmail_present):
             user_val = _get_secret(user_env)
             pwd_val = _get_secret(pwd_env)
-            if not user_val or not pwd_val:
-                st.error(
-                    f"Set {user_env} and {pwd_env} in environment or Streamlit secrets to fetch from Gmail."
-                )
-            else:
-                os.environ[user_env] = user_val
-                os.environ[pwd_env] = pwd_val
-                with st.spinner("Connecting to Gmail and downloading new reports..."):
+            os.environ[user_env] = user_val
+            os.environ[pwd_env] = pwd_val
+            with st.spinner("Connecting to Gmail and downloading new reports..."):
+                try:
+                    PAIR_PNL_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                    cfg_for_fetch = {**config}
+                    cfg_for_fetch["email"] = {**config["email"], "download_dir": str(PAIR_PNL_REPORTS_DIR)}
+                    prev_cwd = os.getcwd()
                     try:
-                        PAIR_PNL_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-                        cfg_for_fetch = {**config}
-                        cfg_for_fetch["email"] = {**config["email"], "download_dir": str(PAIR_PNL_REPORTS_DIR)}
-                        prev_cwd = os.getcwd()
-                        try:
-                            os.chdir(PAIR_PNL_ROOT)
-                            saved = pp.fetch_gmail_attachments(cfg_for_fetch)
-                        finally:
-                            os.chdir(prev_cwd)
-                        st.success(f"Downloaded / verified {len(saved)} attachment(s).")
-                        st.cache_data.clear()
-                    except SystemExit as exc:
-                        st.error(str(exc))
-                    except Exception as exc:
-                        st.error(f"Fetch failed: {type(exc).__name__}: {exc}")
+                        os.chdir(PAIR_PNL_ROOT)
+                        saved = pp.fetch_gmail_attachments(cfg_for_fetch)
+                    finally:
+                        os.chdir(prev_cwd)
+                    st.success(f"Downloaded / verified {len(saved)} attachment(s).")
+                    st.cache_data.clear()
+                except SystemExit as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Fetch failed: {type(exc).__name__}: {exc}")
+        if not gmail_present and db_report_count:
+            st.caption("Using auto-updated `swap_reports.db`.")
     with c_recalc:
         if st.button("Recalculate", key="pair_pnl_recalc"):
             st.cache_data.clear()
@@ -196,17 +400,28 @@ def _render_long_short_pair_section():
             )
 
     PAIR_PNL_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    excel_report_count = sum(
+        1 for p in PAIR_PNL_REPORTS_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in {".xlsx", ".xlsm", ".csv"}
+    )
 
-    user_env = config.get("email", {}).get("imap_user_env", "GMAIL_USER")
-    pwd_env = config.get("email", {}).get("imap_password_env", "GMAIL_APP_PASSWORD")
-    gmail_present = bool(_get_secret(user_env) and _get_secret(pwd_env))
-
-    with st.expander("Setup status", expanded=not gmail_present):
+    with st.expander("Setup status", expanded=not gmail_present and not db_report_count):
         s1, s2, s3 = st.columns(3)
-        s1.markdown(f"**Gmail IMAP**  \n{'OK' if gmail_present else 'NOT SET'}")
+        s1.markdown(
+            f"**Gmail IMAP**  \n"
+            f"{'OK' if gmail_present else ('DB fallback active' if db_report_count else 'NOT SET')}"
+        )
         s2.markdown(f"**FMP API key**  \n{'OK' if fmp_key_present else 'NOT SET (Yahoo fallback active)'}")
-        s3.markdown(f"**Reports dir**  \n`{PAIR_PNL_REPORTS_DIR}`")
-        if not gmail_present:
+        s3.markdown(
+            f"**Report source**  \n"
+            f"{'Excel files' if excel_report_count else f'`{SWAP_DB_FILE}`'}"
+        )
+        if not gmail_present and db_report_count:
+            st.markdown(
+                "Direct Gmail fetch is not configured in Streamlit Cloud, so this page is using "
+                "the committed `swap_reports.db` that the local Gmail automation updates."
+            )
+        elif not gmail_present:
             st.markdown(
                 "Set `GMAIL_USER` and `GMAIL_APP_PASSWORD` in **Streamlit Cloud → Manage app → "
                 "Settings → Secrets** to enable auto-fetch. Until then, upload JMLNKWGE `.xlsx` "
@@ -234,27 +449,37 @@ def _render_long_short_pair_section():
         p for p in PAIR_PNL_REPORTS_DIR.iterdir()
         if p.is_file() and p.suffix.lower() in {".xlsx", ".xlsm", ".csv"}
     )
-    if not report_files:
+    if report_files:
+        st.caption(f"{len(report_files)} report file(s) loaded from `{PAIR_PNL_REPORTS_DIR}`.")
+        results, skipped = _compute_pair_pnl_results(
+            tuple(str(p) for p in report_files),
+            require_smt=fmp_key_present,
+        )
+    else:
+        results, skipped = _compute_pair_pnl_results_from_db()
+        if results:
+            st.caption(f"{len(results)} report(s) loaded from `{SWAP_DB_FILE}`.")
+        else:
+            if skipped:
+                with st.expander(f"{len(skipped)} DB load issue(s)"):
+                    for name, reason in skipped:
+                        st.write(f"- **{name}**: {reason}")
+            st.info(
+                "No swap reports are available yet. Configure Gmail secrets for direct fetch, "
+                "or let the local Gmail automation update `swap_reports.db` and push it to the deploy branch."
+            )
+            return
+
+    if not results:
         st.info(
-            "No swap reports on disk yet. Use the uploader above, the **Fetch latest from Gmail** "
-            "button (requires Gmail secrets), or drop `.xlsx` files into "
-            f"`{PAIR_PNL_REPORTS_DIR}` if running locally."
+            "No PnL rows could be calculated from the available swap report source."
         )
         return
 
-    st.caption(f"{len(report_files)} report file(s) loaded.")
-
-    results, skipped = _compute_pair_pnl_results(
-        tuple(str(p) for p in report_files),
-        require_smt=fmp_key_present,
-    )
     if skipped:
         with st.expander(f"{len(skipped)} report(s) skipped"):
             for name, reason in skipped:
                 st.write(f"- **{name}**: {reason}")
-    if not results:
-        st.error("No PnL could be calculated from available reports.")
-        return
 
     df = pp.results_to_frame(results)
     df_view = df.copy()
