@@ -19,3 +19,10 @@ pnl_report/reports/*.csv
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Runtime logs
+*.log
+.auto_push_excel.log
+auto_update.log
+launchd_stdout.log
+launchd_stderr.log

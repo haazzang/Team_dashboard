@@ -1,0 +1,3 @@
+definition,count_since_1950,includes_2026_04_08
+Strict 4-event signal,4,False
+Loose close-cross signal,23,True

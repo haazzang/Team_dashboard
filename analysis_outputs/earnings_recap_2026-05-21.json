@@ -1,0 +1,356 @@
+{
+  "date": "2026-05-21",
+  "n_calendar": 3,
+  "n_reported": 3,
+  "results": [
+    {
+      "symbol": "WMT",
+      "raw_calendar": {
+        "symbol": "WMT",
+        "date": "2026-05-21",
+        "epsActual": 0.66,
+        "epsEstimated": 0.659,
+        "revenueActual": 177751000000,
+        "revenueEstimated": 174841700000,
+        "lastUpdated": "2026-05-21"
+      },
+      "quote": {
+        "symbol": "WMT",
+        "name": "Walmart Inc.",
+        "price": 121.34,
+        "changePercentage": -7.26786,
+        "change": -9.51,
+        "volume": 52788301,
+        "dayLow": 120.4,
+        "dayHigh": 125.62,
+        "yearHigh": 135.16,
+        "yearLow": 93.43,
+        "marketCap": 967199989090,
+        "priceAvg50": 127.1312,
+        "priceAvg200": 114.5874,
+        "exchange": "NASDAQ",
+        "open": 124.408,
+        "previousClose": 130.85,
+        "timestamp": 1779393600
+      },
+      "profile": {
+        "symbol": "WMT",
+        "price": 121.34,
+        "marketCap": 967199989090,
+        "beta": 0.652,
+        "lastDividend": 0.965,
+        "range": "93.43-135.16",
+        "change": -9.51,
+        "changePercentage": -7.26786,
+        "volume": 52788301,
+        "averageVolume": 18565216,
+        "companyName": "Walmart Inc.",
+        "currency": "USD",
+        "cik": "0000104169",
+        "isin": "US9311421039",
+        "cusip": "931142103",
+        "exchangeFullName": "NASDAQ Global Select",
+        "exchange": "NASDAQ",
+        "industry": "Discount Stores",
+        "website": "https://corporate.walmart.com",
+        "description": "Walmart Inc. engages in the operation of retail, wholesale, other units, and eCommerce worldwide. The company operates through three segments: Walmart U.S., Walmart International, and Sam's Club. It operates supercenters, supermarkets, hypermarkets, warehouse clubs, cash and carry stores, and discount stores under Walmart and Walmart Neighborhood Market brands; membership-only warehouse clubs; ecommerce websites, such as walmart.com.mx, walmart.ca, flipkart.com, PhonePe and other sites; and mobile commerce applications. The company offers grocery and consumables, including dairy, meat, bakery, deli, produce, dry, chilled or frozen packaged foods, alcoholic and nonalcoholic beverages, floral, snack foods, candy, other grocery items, health and beauty aids, paper goods, laundry and home care, baby care, pet supplies, and other consumable items; fuel, tobacco and other categories. It is also involved in the provision of health and wellness products covering pharmacy, optical and hearing services, and over-the-counter drugs and other medical products; and home and apparel including home improvement, outdoor living, gardening, furniture, apparel, jewelry, tools and power equipment, housewares, toys, seasonal items, mattresses and tire and battery centers. In addition, the company offers consumer electronics and accessories, software, video games, office supplies, appliances, and third-party gift cards. Further, it operates digital payment platforms; and offers financial services and related products, including money transfers, bill payments, money orders, check cashing, prepaid access, co-branded credit cards, installment lending, and earned wage access. Additionally, the company markets lines of merchandise under private brands, including Allswell, Athletic Works, Equate, and Free Assembly. The company was formerly known as Wal-Mart Stores, Inc. and changed its name to Walmart Inc. in February 2018. Walmart Inc. was founded in 1945 and is based in Bentonville, Arkansas.",
+        "ceo": "John R. Furner",
+        "sector": "Consumer Defensive",
+        "country": "US",
+        "fullTimeEmployees": "2100000",
+        "phone": "479 273 4000",
+        "address": "1 Customer Drive",
+        "city": "Bentonville",
+        "state": "AR",
+        "zip": "72716",
+        "image": "https://images.financialmodelingprep.com/symbol/WMT.png",
+        "ipoDate": "1972-08-25",
+        "defaultImage": false,
+        "isEtf": false,
+        "isActivelyTrading": true,
+        "isAdr": false,
+        "isFund": false
+      },
+      "historical": [
+        {
+          "symbol": "WMT",
+          "date": "2026-05-14",
+          "price": 132.46,
+          "volume": 14200408
+        },
+        {
+          "symbol": "WMT",
+          "date": "2026-05-15",
+          "price": 131.45,
+          "volume": 25323000
+        },
+        {
+          "symbol": "WMT",
+          "date": "2026-05-18",
+          "price": 133.34,
+          "volume": 17183216
+        },
+        {
+          "symbol": "WMT",
+          "date": "2026-05-19",
+          "price": 134.2,
+          "volume": 16957144
+        },
+        {
+          "symbol": "WMT",
+          "date": "2026-05-20",
+          "price": 130.85,
+          "volume": 28471632
+        },
+        {
+          "symbol": "WMT",
+          "date": "2026-05-21",
+          "price": 121.34,
+          "volume": 52833902
+        }
+      ],
+      "aftermarket": {
+        "symbol": "WMT",
+        "bidSize": 1,
+        "bidPrice": 121.9,
+        "askSize": 1,
+        "askPrice": 121.95,
+        "volume": 53006557,
+        "timestamp": 1779407965000
+      }
+    },
+    {
+      "symbol": "ZM",
+      "raw_calendar": {
+        "symbol": "ZM",
+        "date": "2026-05-21",
+        "epsActual": 1.45,
+        "epsEstimated": 1.41,
+        "revenueActual": 1239006000,
+        "revenueEstimated": 1224210000,
+        "lastUpdated": "2026-05-21"
+      },
+      "quote": {
+        "symbol": "ZM",
+        "name": "Zoom Communications, Inc.",
+        "price": 96.75,
+        "changePercentage": -2.68558,
+        "change": -2.67,
+        "volume": 8923117,
+        "dayLow": 95.36,
+        "dayHigh": 100.0699,
+        "yearHigh": 111.56,
+        "yearLow": 69.15,
+        "marketCap": 28516243415,
+        "priceAvg50": 88.7592,
+        "priceAvg200": 84.8405,
+        "exchange": "NASDAQ",
+        "open": 99,
+        "previousClose": 99.42,
+        "timestamp": 1779393601
+      },
+      "profile": {
+        "symbol": "ZM",
+        "price": 96.75,
+        "marketCap": 28516243415,
+        "beta": 1.003,
+        "lastDividend": 0,
+        "range": "69.15-111.56",
+        "change": -2.67,
+        "changePercentage": -2.68558,
+        "volume": 8923117,
+        "averageVolume": 4723661,
+        "companyName": "Zoom Communications, Inc.",
+        "currency": "USD",
+        "cik": "0001585521",
+        "isin": "US98980L1017",
+        "cusip": "98980L101",
+        "exchangeFullName": "NASDAQ Global Select",
+        "exchange": "NASDAQ",
+        "industry": "Software - Application",
+        "website": "https://www.zoom.com",
+        "description": "Zoom Communications, Inc. engages in the provision of a communications and collaboration platform. It operates through the following geographical segments: Americas, Asia Pacific, and Europe, Middle East, and Africa. The company was founded by Eric S. Yuan in 2011 and is headquartered in San Jose, CA.",
+        "ceo": "Eric S. Yuan",
+        "sector": "Technology",
+        "country": "US",
+        "fullTimeEmployees": "7412",
+        "phone": "888 799 9666",
+        "address": "55 Almaden Boulevard",
+        "city": "San Jose",
+        "state": "CA",
+        "zip": "95113",
+        "image": "https://images.financialmodelingprep.com/symbol/ZM.png",
+        "ipoDate": "2019-04-18",
+        "defaultImage": false,
+        "isEtf": false,
+        "isActivelyTrading": true,
+        "isAdr": false,
+        "isFund": false
+      },
+      "historical": [
+        {
+          "symbol": "ZM",
+          "date": "2026-05-14",
+          "price": 98.23,
+          "volume": 6261210
+        },
+        {
+          "symbol": "ZM",
+          "date": "2026-05-15",
+          "price": 100.16,
+          "volume": 6579314
+        },
+        {
+          "symbol": "ZM",
+          "date": "2026-05-18",
+          "price": 98.87,
+          "volume": 6000225
+        },
+        {
+          "symbol": "ZM",
+          "date": "2026-05-19",
+          "price": 97.39,
+          "volume": 5873300
+        },
+        {
+          "symbol": "ZM",
+          "date": "2026-05-20",
+          "price": 99.42,
+          "volume": 4969435
+        },
+        {
+          "symbol": "ZM",
+          "date": "2026-05-21",
+          "price": 96.75,
+          "volume": 9018592
+        }
+      ],
+      "aftermarket": {
+        "symbol": "ZM",
+        "bidSize": 19,
+        "bidPrice": 104.58,
+        "askSize": 59,
+        "askPrice": 104.98,
+        "volume": 9122749,
+        "timestamp": 1779407991000
+      }
+    },
+    {
+      "symbol": "NIO",
+      "raw_calendar": {
+        "symbol": "NIO",
+        "date": "2026-05-21",
+        "epsActual": -0.02899,
+        "epsEstimated": -0.07501,
+        "revenueActual": 3700448000,
+        "revenueEstimated": 3689265000,
+        "lastUpdated": "2026-05-21"
+      },
+      "quote": {
+        "symbol": "NIO",
+        "name": "NIO Inc.",
+        "price": 5.575,
+        "changePercentage": -0.26834,
+        "change": -0.015,
+        "volume": 96107045,
+        "dayLow": 5.41,
+        "dayHigh": 5.945,
+        "yearHigh": 8.02,
+        "yearLow": 3.34,
+        "marketCap": 13141206148,
+        "priceAvg50": 6.0788,
+        "priceAvg200": 5.8164,
+        "exchange": "NYSE",
+        "open": 5.92,
+        "previousClose": 5.59,
+        "timestamp": 1779393599
+      },
+      "profile": {
+        "symbol": "NIO",
+        "price": 5.575,
+        "marketCap": 13141206148,
+        "beta": 0.975,
+        "lastDividend": 0,
+        "range": "3.34-8.02",
+        "change": -0.015,
+        "changePercentage": -0.26834,
+        "volume": 96107045,
+        "averageVolume": 39991835,
+        "companyName": "NIO Inc.",
+        "currency": "USD",
+        "cik": "0001736541",
+        "isin": "US62914V1061",
+        "cusip": "62914V106",
+        "exchangeFullName": "New York Stock Exchange",
+        "exchange": "NYSE",
+        "industry": "Auto - Manufacturers",
+        "website": "https://www.nio.com",
+        "description": "NIO Inc. designs, develops, manufactures, and sells smart electric vehicles in China. It offers five and six-seater electric SUVs, as well as smart electric sedans. The company also offers power solutions, including Power Home, a home charging solution; Power Swap, a battery swapping service; Power Charger and Destination Charger; Power Mobile, a mobile charging service through charging vans; Power Map, an application that provides access to a network of public chargers and their real-time information; and One Click for Power valet service. In addition, it provides repair, maintenance, and bodywork services through its NIO service centers and authorized third-party service centers; statutory and third-party liability insurance, and vehicle damage insurance through third-party insurers; repair and routine maintenance; roadside assistance; courtesy vehicle services; data packages; and auto financing and financial leasing services. Further, the company involved in the provision of energy and service packages to its users; design and technology development activities; manufacture of e-powertrains, battery packs, and components; and sales and after sales management activities. Additionally, it offers NIO Certified, a used vehicle inspection, evaluation, acquisition, and sales service. The company was formerly known as NextEV Inc. and changed its name to NIO Inc. in July 2017. NIO Inc. was incorporated in 2014 and is headquartered in Shanghai, China.",
+        "ceo": "Bin Li",
+        "sector": "Consumer Cyclical",
+        "country": "CN",
+        "fullTimeEmployees": "45635",
+        "phone": "86 21 6908 2018",
+        "address": "Building 20",
+        "city": "Shanghai",
+        "state": null,
+        "zip": "201804",
+        "image": "https://images.financialmodelingprep.com/symbol/NIO.png",
+        "ipoDate": "2018-09-12",
+        "defaultImage": false,
+        "isEtf": false,
+        "isActivelyTrading": true,
+        "isAdr": true,
+        "isFund": false
+      },
+      "historical": [
+        {
+          "symbol": "NIO",
+          "date": "2026-05-14",
+          "price": 6.25,
+          "volume": 36782100
+        },
+        {
+          "symbol": "NIO",
+          "date": "2026-05-15",
+          "price": 6.1,
+          "volume": 26892900
+        },
+        {
+          "symbol": "NIO",
+          "date": "2026-05-18",
+          "price": 5.88,
+          "volume": 31340000
+        },
+        {
+          "symbol": "NIO",
+          "date": "2026-05-19",
+          "price": 5.74,
+          "volume": 22830100
+        },
+        {
+          "symbol": "NIO",
+          "date": "2026-05-20",
+          "price": 5.59,
+          "volume": 45304200
+        },
+        {
+          "symbol": "NIO",
+          "date": "2026-05-21",
+          "price": 5.6,
+          "volume": 100997259
+        }
+      ],
+      "aftermarket": {
+        "symbol": "NIO",
+        "bidSize": 21500,
+        "bidPrice": 5.6,
+        "askSize": 26700,
+        "askPrice": 5.62,
+        "volume": 101111819,
+        "timestamp": 1779407962000
+      }
+    }
+  ],
+  "failures": []
+}

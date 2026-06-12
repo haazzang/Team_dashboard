@@ -68,52 +68,95 @@ def main():
 
     log(stdout)
 
-    # 2. DB 변경사항 확인
-    log("DB 변경사항 확인 중...")
-    success, stdout, stderr = run_command('git status --porcelain swap_reports.db', cwd=ROOT_DIR)
-
-    if not stdout.strip():
-        log("변경사항 없음 - 업데이트 불필요")
-        return True
-
-    log(f"변경 감지: {stdout.strip()}")
-
-    # 3. git add
-    log("git add 실행 중...")
-    success, stdout, stderr = run_command('git add swap_reports.db', cwd=ROOT_DIR)
-    if not success:
-        log(f"git add 오류: {stderr}")
-        return False
-
-    # 4. git commit
-    log("git commit 실행 중...")
+    # 2. 배포 브랜치(master)의 DB 갱신
+    #    main/master 가 갈라져 있어 `git push main:master` 는 거부되므로,
+    #    git plumbing 으로 origin/master 위에 swap_reports.db 한 파일만 바꾼
+    #    커밋을 만들어 push 한다. 작업 트리/로컬 브랜치를 전혀 건드리지 않고
+    #    항상 fast-forward 가 보장된다.
     commit_msg = f"Auto-update swap_reports.db ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
-    success, stdout, stderr = run_command(f'git commit -m "{commit_msg}"', cwd=ROOT_DIR)
-    if not success:
-        log(f"git commit 오류: {stderr}")
+    if not push_db_to_master(commit_msg):
         return False
-
-    log(f"커밋 완료: {commit_msg}")
-
-    # 5. git push
-    log("git push 실행 중...")
-    success, stdout, stderr = run_command('git push origin main', cwd=ROOT_DIR)
-    if not success:
-        log(f"git push 오류: {stderr}")
-        return False
-
-    log("Push 완료!")
-
-    # master 브랜치도 업데이트
-    success, stdout, stderr = run_command('git push origin main:master', cwd=ROOT_DIR)
-    if success:
-        log("master 브랜치도 업데이트 완료")
 
     log("=" * 50)
     log("자동 업데이트 완료!")
     log("=" * 50)
 
     return True
+
+
+def push_db_to_master(commit_msg, deploy_branch='master', db_path='swap_reports.db'):
+    """origin/<deploy_branch> 위에 swap_reports.db 만 교체한 커밋을 만들어 push.
+
+    main/master 가 갈라져 있어도 항상 origin/master 를 부모로 삼으므로
+    fast-forward push 가 보장된다.
+    """
+    db_file = ROOT_DIR / db_path
+    if not db_file.exists():
+        log(f"오류: {db_file} 없음")
+        return False
+
+    # 최신 origin/master 가져오기
+    log(f"origin/{deploy_branch} fetch 중...")
+    ok, out, err = run_command(f'git fetch origin {deploy_branch}', cwd=ROOT_DIR)
+    if not ok:
+        log(f"fetch 오류: {err}")
+        return False
+
+    # 현재 master 의 db blob 과 비교 -> 동일하면 스킵
+    ok, master_blob, _ = run_command(
+        f'git rev-parse origin/{deploy_branch}:{db_path}', cwd=ROOT_DIR
+    )
+    # -w 필수: 해시만 계산하면 blob 이 object db 에 없어 write-tree 가
+    # "invalid object" 로 실패한다.
+    ok2, new_blob, err2 = run_command(f'git hash-object -w "{db_file}"', cwd=ROOT_DIR)
+    if not ok2:
+        log(f"hash-object 오류: {err2}")
+        return False
+    if ok and master_blob.strip() == new_blob.strip():
+        log(f"{deploy_branch} 의 DB 가 이미 최신 - 업데이트 불필요")
+        return True
+
+    # 임시 인덱스에 origin/master 트리를 읽고 db 만 교체 -> 새 트리/커밋 생성
+    tmp_index = ROOT_DIR / '.git' / 'tmp-master-index'
+    env_prefix = f'GIT_INDEX_FILE="{tmp_index}" '
+    try:
+        steps = [
+            f'{env_prefix}git read-tree origin/{deploy_branch}',
+            f'{env_prefix}git update-index --add --cacheinfo 100644,{new_blob.strip()},{db_path}',
+        ]
+        for cmd in steps:
+            ok, out, err = run_command(cmd, cwd=ROOT_DIR)
+            if not ok:
+                log(f"인덱스 구성 오류: {cmd}\n{err}")
+                return False
+
+        ok, tree, err = run_command(f'{env_prefix}git write-tree', cwd=ROOT_DIR)
+        if not ok:
+            log(f"write-tree 오류: {err}")
+            return False
+        tree = tree.strip()
+
+        ok, commit, err = run_command(
+            f'git commit-tree {tree} -p origin/{deploy_branch} -m "{commit_msg}"',
+            cwd=ROOT_DIR,
+        )
+        if not ok:
+            log(f"commit-tree 오류: {err}")
+            return False
+        commit = commit.strip()
+
+        log(f"{deploy_branch} 에 push 중... ({commit[:8]})")
+        ok, out, err = run_command(
+            f'git push origin {commit}:refs/heads/{deploy_branch}', cwd=ROOT_DIR
+        )
+        if not ok:
+            log(f"push 오류: {err}")
+            return False
+        log(f"Push 완료! ({deploy_branch} <- {commit[:8]}): {commit_msg}")
+        return True
+    finally:
+        if tmp_index.exists():
+            tmp_index.unlink()
 
 
 if __name__ == '__main__':
