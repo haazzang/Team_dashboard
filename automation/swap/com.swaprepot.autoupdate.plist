@@ -7,12 +7,15 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/Users/hyejinha/Desktop/Workspace/Team/env/bin/python</string>
         <string>/Users/hyejinha/Desktop/Workspace/Team/automation/swap/auto_update_swap_reports.py</string>
     </array>
 
-    <key>WorkingDirectory</key>
-    <string>/Users/hyejinha/Desktop/Workspace/Team</string>
+    <!--
+      WorkingDirectory 를 ~/Desktop 하위로 두면 launchd 의 chdir 이
+      macOS 보안(TCC)에 막혀 프로세스 spawn 자체가 실패한다(exit 78).
+      스크립트가 모든 경로를 절대경로로 처리하므로 WorkingDirectory 는 지정하지 않는다.
+    -->
 
     <!-- 매일 오후 7시 (19:00)에 실행 -->
     <key>StartCalendarInterval</key>
@@ -23,11 +26,11 @@
         <integer>0</integer>
     </dict>
 
-    <!-- 로그 파일 -->
+    <!-- 로그 파일 (TCC 보호 폴더 밖) -->
     <key>StandardOutPath</key>
-    <string>/Users/hyejinha/Desktop/Workspace/Team/launchd_stdout.log</string>
+    <string>/Users/hyejinha/Library/Logs/swap_report_autoupdate.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/hyejinha/Desktop/Workspace/Team/launchd_stderr.log</string>
+    <string>/Users/hyejinha/Library/Logs/swap_report_autoupdate.err.log</string>
 
     <key>RunAtLoad</key>
     <false/>

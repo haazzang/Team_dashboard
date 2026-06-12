@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 from dashboard.core import *  # noqa: F401,F403
-from dashboard.core import _clean_symbol, _find_file_by_name, _normalize_filename, _resolve_normalized_path
+from dashboard.core import _clean_symbol, _find_file_by_name, _get_streamlit_secret, _normalize_filename, _resolve_normalized_path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SNAPSHOT_AUTO_REFRESH_SECONDS = 2
@@ -63,8 +63,8 @@ def _resolve_snapshot_data_path(filename):
         elif _normalize_filename(env_candidate.name) == _normalize_filename(filename):
             candidates.append(env_candidate)
 
-    if hasattr(st, "secrets") and "PORTFOLIO_XLSX_PATH" in st.secrets:
-        secret_path = st.secrets["PORTFOLIO_XLSX_PATH"]
+    secret_path = _get_streamlit_secret("PORTFOLIO_XLSX_PATH")
+    if secret_path:
         resolved_secret = _resolve_normalized_path(secret_path)
         secret_candidate = resolved_secret if resolved_secret else Path(secret_path)
         if secret_candidate.is_dir():

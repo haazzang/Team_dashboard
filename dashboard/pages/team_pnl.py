@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from dashboard.core import *  # noqa: F401,F403
-from dashboard.core import _find_file_by_name, _resolve_normalized_path
+from dashboard.core import _find_file_by_name, _get_streamlit_secret, _resolve_normalized_path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
@@ -23,8 +23,8 @@ def render_team_pnl_page():
         if env_path:
             resolved_env = _resolve_normalized_path(env_path)
             pnl_candidates.append(resolved_env if resolved_env else Path(env_path))
-        if hasattr(st, "secrets") and "TEAM_PNL_XLSX_PATH" in st.secrets:
-            secret_path = st.secrets["TEAM_PNL_XLSX_PATH"]
+        secret_path = _get_streamlit_secret("TEAM_PNL_XLSX_PATH")
+        if secret_path:
             resolved_secret = _resolve_normalized_path(secret_path)
             pnl_candidates.append(resolved_secret if resolved_secret else Path(secret_path))
         pnl_candidates.extend([

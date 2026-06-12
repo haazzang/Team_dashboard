@@ -1,6 +1,7 @@
 import streamlit as st
 
 from dashboard.pages.cash_equity import render_cash_equity_page
+from dashboard.pages.prediction_markets import render_prediction_markets_page
 from dashboard.pages.snapshot import render_snapshot_page
 from dashboard.pages.swap_report import render_swap_report_page
 from dashboard.pages.team_pnl import render_team_pnl_page
@@ -128,6 +129,7 @@ def _apply_global_styles():
 
 MENU_RENDERERS = {
     "Portfolio Snapshot": render_snapshot_page,
+    "Prediction Markets (Iran)": render_prediction_markets_page,
     "Total Portfolio (Team PNL)": render_team_pnl_page,
     "Cash Equity Analysis": render_cash_equity_page,
     "Weekly Report Generator": render_weekly_report_page,

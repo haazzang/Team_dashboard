@@ -134,7 +134,7 @@ if [[ "$RUN_ONCE" == "1" ]]; then
 fi
 last_signature=$(get_signature "$FILE_PATH")
 
-fswatch -o "$WATCH_DIR" | while read -r _; do
+while read -r _; do
   sleep 2
   if [[ ! -f "$FILE_PATH" ]]; then
     continue
@@ -146,4 +146,4 @@ fswatch -o "$WATCH_DIR" | while read -r _; do
   fi
   last_signature="$signature"
   sync_file
-done
+done < <(fswatch -o "$WATCH_DIR")
